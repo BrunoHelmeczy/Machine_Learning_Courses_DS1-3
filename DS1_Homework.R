@@ -114,7 +114,7 @@ Boxes_n_Scatters <- function() {
 }
 # Boxes_n_Scatters()
 
-# By default with raw variables, we see Area-related variables to be highly skewed,
+# By default with raw variables, we see Area-related variables to be highly skewed, ----
   #   while in all cases there are a number of zero values. When such areas values are zero,
   #   it implies there is no such aspect of the building, e.g. no garage.
   #   It is in and of itself a value driver if a garage exists 
@@ -146,7 +146,7 @@ df <- df %>% mutate(
   Easements       = as.factor(ifelse(Easements > 0,1,0))
 )
 
-# log-transform:
+# log-transforms: ----
 # BuiltFAR, BldgDepth, BldgFront, LotDepth, LotFront, UnitTotal, UnitsRes,
 # NumFloors, NumBldgs, OtherArea, FactryArea, StrgeArea, GarageArea, RetailArea,
 # OfficeArea, ResArea, ComArea, BldgArea, LotArea, Easements
@@ -261,8 +261,7 @@ data_holdout$ols_pred <- predict(ols_model, newdata = data_holdout)
 Hd_MAE <- MAE(data_holdout$ols_pred, data_holdout$logTotalValue)
 Hd_RMSE <- RMSE(data_holdout$ols_pred, data_holdout$logTotalValue)
 
-
-
+# OLS Summary - Cross-Validation & Holdout data
 OLS_Summ <- as.data.frame(rbind(cbind(CV_MAE,CV_RMSE,CV_R2),cbind(Hd_MAE,Hd_RMSE,CV_R2)))
 rownames(OLS_Summ) <- c("CV_Stats","Holdout_Stats")
 colnames(OLS_Summ) <- c("MAE","RMSE","R^2")
@@ -287,6 +286,7 @@ set.seed(1234)
 system.time({
 ridge_model <- cv.glmnet(
   x = x_train, y = data_train[["logTotalValue"]], 
+  lambda = lambda_grid,
   family = "gaussian", # for continuous response
   alpha = 0,  # the ridge model
   nfolds = 10
@@ -298,12 +298,35 @@ plot(ridge_model, xvar = "lambda", main = "Collapsing Coefs. in RIDGE")
 best_lambda <- ridge_model$lambda.min
 message(paste0("The optimally chosen penalty parameter: ", best_lambda))
 
-
-ridge_model[[2]][c(98,100)]^2
-#best_fit <- ridge_model$glmnet.fit
+# RMSE for Highest Good Enough & Best Fits
+ridge_model[[2]][c(54,79)]^2
 
 highest_good_enough_lambda <- ridge_model$lambda.1se
 message(paste0("The highest good enough penalty parameter: ", highest_good_enough_lambda))
+
+# LASSO GLM version ----
+set.seed(1234)
+system.time({
+  lasso_model <- cv.glmnet(
+    x = x_train, y = data_train[["logTotalValue"]], 
+    lambda = lambda_grid,
+    family = "gaussian", # for continuous response
+    alpha = 1,  # the ridge model
+    nfolds = 10
+  )
+})
+
+plot(lasso_model, xvar = "lambda", main = "Collapsing Coefs. in LASSO")
+
+best_lambda <- lasso_model$lambda.min
+message(paste0("The optimally chosen penalty parameter: ", best_lambda))
+
+# RMSE for Highest Good Enough & Best Fits
+lasso_model[[2]][c(67,77)]^2
+
+highest_good_enough_lambda <- lasso_model$lambda.1se
+message(paste0("The highest good enough penalty parameter: ", highest_good_enough_lambda))
+
 
 
 
@@ -313,59 +336,130 @@ message(paste0("The highest good enough penalty parameter: ", highest_good_enoug
 
 
 ### CARET versions ----
-### LASSO
-# Again, let's look at individual coefficients. 
-# We can see that some are set exactly to zero for higher values of the penalty term. 
-# This is in contrast to what we saw with the Ridge model.
+### LASSO ----
 
-set.seed(1234)
-lasso_model <- glmnet(
-  x = x_train, y = data_train[["log_sale_price"]], 
-  family = "gaussian",
-  alpha = 1  # the lasso model
+lasso_tune_grid <- expand.grid(
+  "alpha" = c(1),
+  "lambda" = 10^seq(2,-5,length=100)
 )
 
-plot(lasso_model, xvar = "lambda")
-
-lasso_coeffs <- get_glmnet_coeff_sequence(lasso_model)
-
-
-
-selected_variables <- c("gr_liv_area", "tot_rms_abv_grd", "garage_area", "kitchen_abv_gr")
-ggplot(
-  data = lasso_coeffs %>% filter(variable %in% selected_variables),
-  aes(x = log(lambda), y = value)) +
-    geom_line() +
-  facet_wrap(~ variable, scales = "free_y", ncol = 1)
-
-
-#Again, we can apply cross-validation to determine the optimal value for the penalty term.
 set.seed(1234)
-lasso_model_cv <- cv.glmnet(
-  x = x_train, y = data_train[["log_sale_price"]], 
-  family = "gaussian",
-  alpha = 1,
-  nfolds = 10
+system.time({
+lasso_fit <- train(
+  Formula,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = lasso_tune_grid,
+  trControl = train_control
+)
+})
+
+lasso_fit %>% ggplot() +xlim(c(0,1))
+
+lasso_fit$results %>% ggplot(aes(x = lambda)) +
+  geom_line(aes(y = RMSE), color = "blue") +
+  geom_line(aes(y = Rsquared), color = "red") + 
+  geom_line(aes(y = MAE), color = "green") + xlim(c(0,1))
+
+### RIDGE ----
+ridge_tune_grid <- expand.grid(
+  "alpha" = c(0),
+  "lambda" = 10^seq(2,-5,length=100)  
 )
 
-best_lambda <- lasso_model_cv$lambda.min
-message(paste0("The optimally chosen penalty parameter: ", best_lambda))
+set.seed(1234)
+system.time({
+ridge_fit <- train(
+  Formula,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = train_control
+)
+})
 
-highest_good_enough_lambda <- lasso_model_cv$lambda.1se
-message(paste0("The highest good enough penalty parameter: ", highest_good_enough_lambda))
+ridge_fit %>% ggplot()
+
+ridge_fit$results %>% ggplot(aes(x = lambda)) +
+  geom_line(aes(y = RMSE)) +
+  geom_line(aes(y = Rsquared)) + 
+  geom_line(aes(y = MAE))
 
 
-### RIDGE
+### Elastic Net ----
+enet_tune_grid <- expand.grid(
+  "alpha" = seq(0, 1, by = 0.1),
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
+)
+
+set.seed(1234)
+system.time({
+  enet_fit <- train(
+    Formula,
+    data = data_train,
+    method = "glmnet",
+    preProcess = c("center", "scale"),
+    tuneGrid = enet_tune_grid,
+    trControl = train_control
+  )  
+})
+
+enet_fit$results %>% arrange(RMSE)
 
 
-### Elastic Net
+
+#### Summary ----
+
+resample_profile <- resamples(
+  list("OLS" = ols_model,
+       "RIDGE" = ridge_fit,
+       "LASSO" = lasso_fit,
+       "Elastic Net" = enet_fit
+  )
+) 
+
+
+Models <- list("OLS" = ols_model,"RIDGE" = ridge_fit,
+               "LASSO" = lasso_fit,"Elastic Net" = enet_fit)
+
+ols_coeffs <- as.matrix(coef(ols_model$finalModel))
+lasso_coeffs <- as.matrix(coef(lasso_fit$finalModel, lasso_fit$bestTune$lambda))
+ridge_coeffs <- as.matrix(coef(ridge_fit$finalModel, ridge_fit$bestTune$lambda))
+enet_coeffs <- as.matrix(coef(enet_fit$finalModel, enet_fit$bestTune$lambda))
+
+Nr_Vars <- list(
+  "OLS"   = sum(ols_coeffs != 0, na.rm = T),
+  "LASSO" = sum(lasso_coeffs != 0),
+  "RIDGE" = sum(ridge_coeffs != 0),
+  "E_Net" = sum(enet_coeffs != 0))
+
+
+Penalized_SummTable <- lapply(names(Models), function(x) {
+  tdf <-  resample_profile$values %>% dplyr::select(matches(x))
+  tl <- list()
+  
+  tl[['Regr.Model']] <- x
+  tl[['CV_MAE']] <- (tdf %>% dplyr::select(matches("MAE")))[[1]] %>% mean() %>% round(4)
+  tl[['CV_RMSE']] <- (tdf %>% dplyr::select(matches("RMSE")))[[1]] %>% mean() %>% round(4)
+  tl[['CV_R^2']] <- (tdf %>% dplyr::select(matches("Rsquared")))[[1]] %>% mean() %>% round(4)
+
+  return(tl)
+}) %>% rbindlist() %>% cbind(Nr_Vars)
+
+
+
+# Based on summary table of Cross-Validated results above, 
+  #   OLS has lowest MAE, Elastic Net has Lowest RMSE & Highest R^2
+
 
 # e)  Which model is "simplest one still good enough" ?
     #   Explore adding: selectionFunction = "oneSE" to trainControl
 
 
 
-# f) Try improve Linaer Model w PCA 4 Dim Reduction.
+# f) Try improve Linear Model w PCA 4 Dim Reduction.
     #   Center & Scale variables -> use pcr 2 find optimal number of PCs
     #   Does PCA Improve fit over simple linear models
     #     # Many factor variables -> Include 60-90 PCs in search as well
