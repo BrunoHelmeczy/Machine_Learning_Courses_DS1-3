@@ -406,8 +406,9 @@ system.time({
 
 enet_fit$results %>% arrange(RMSE)
 
-
-
+lasso_fit$bestTune
+ridge_fit$bestTune
+enet_fit$bestTune
 
 # Based on summary table of Cross-Validated results above, 
   #   OLS has lowest MAE, Elastic Net has Lowest RMSE & Highest R^2, 
@@ -749,39 +750,97 @@ library(tidyverse)
 library(caret)
 library(skimr)
 library(janitor)
-
 library(factoextra) # provides nice functions for visualizing the output of PCA
 library(NbClust) # for choosing the optimal number of clusters
-
 library(knitr)
 library(kableExtra)
 
 theme_set(theme_tufte())
 
 data <- USArrests
-print(skim(data))
+GGally::ggpairs(data, title = "USArrests data Scatters, Densities & Correlations")
 
-
-
-# a) Think of data pre-processing steps you may / should / would do before Clustering 
+# a) Think of data pre-processing steps you may / should / would do before Clustering ----
     #   Are there any ?
+      #   Scale variables 
+
+data_scaled <- scale(data) %>% as.data.frame()
+
 
 # b) Determine optimal number of clusters as indicated by NbClust heuristics 
+nb <- NbClust(data_scaled, method = "kmeans", min.nc = 2, max.nc = 10, index = "all")
+
+
+Cluster <- nb$Best.nc["Number_clusters",] %>% cbind() %>% as.data.frame()
+colnames(Cluster) <- "Optimal_Cluster_Nr"
+
+NrClustsRec <- Cluster %>% #group_by(Optimal_Cluster_Nr) %>% summarize(count = n()) %>% 
+    ggplot(aes(x = Optimal_Cluster_Nr)) + 
+    geom_bar(color = "red", fill = "navy") +
+    scale_x_continuous(labels = c(0:10), breaks = c(0:10)) +
+    scale_y_continuous(labels = c(1:11), breaks = c(1:11)) + 
+    labs(title = "Frequency of Recommended Nr. Of Clusters",
+         y = "Nr. Times Reccommended",
+         x = "Nr. of Clusters Recommended")
 
 # c) Use K-means to cluster states using Nr. Clusters found in b)
+km <- kmeans(data_scaled, centers = nb$Best.partition %>% unique() %>% length(),
+             nstart = 30)
+
+data_w_clusters <- mutate(data, cluster = factor(km$cluster))
+
+
+
+# Plots -------
+# Murder
+Murder <- data_w_clusters %>% 
+  ggplot(aes(x = UrbanPop, y = Murder,  color = cluster)) +
+  geom_point( )
+
+# Assault
+Assault <- ggplot(data_w_clusters, aes(x = UrbanPop, y = Assault, color = cluster)) +geom_point()
+
+# Rape
+Rape <- ggplot(data_w_clusters, aes(x = UrbanPop, y = Rape, color = cluster)) +  geom_point()
+
     #   Plus anything else you think makes sense
     #   Plot observations colored by Clusters
       #   Urban population vs another Crime-related Variable
         #   See e.g. code from class - use factor(kn$cluster) 4 vector of class labels
 
-# d) Do PCA & Get 1st 2 PC coordinates 4 all observations: 
-#   pca_result <- prcomp(data,scale = T)
-#   first_two_pc <- as_tibble(pca_results$x[,1:2])
+# d) Do PCA & Get 1st 2 PC coordinates 4 all observations: ----
+pca_result <- prcomp(data,scale = T)
+
+pca_result$x[,1:2]
+pca_result$rotation %>% colSums()
+Cities <- rownames(pca_result$x)
+
+first_two_pc <- pca_result$x[,1:2] %>% as.data.frame()
+first_two_pc <- first_two_pc %>% mutate(cluster = factor(km$cluster),
+                                        City = Cities)
+
+rownames(first_two_pc) <- Cities
 
     #   Plot clusters of choice along co-ordinate system of 1st 2 PCs
-      #   How do clusters relate to these?
 
+PC12Plot <- first_two_pc %>% ggplot(aes(x = PC1,y = PC2, color = cluster)) +
+  geom_point() +geom_text(label = Cities, size = 3, hjust = -0.1)
 
+  # Very clear Seperation along PC1 
+
+#   How do clusters relate to these?
+ClusterTable <- data_w_clusters %>% group_by(cluster) %>%
+  summarize(StateCount = n(),
+            AvgMurder = mean(Murder)     ,AvgAssault = mean(Assault),
+            AvgUrbanPop = mean(UrbanPop) ,AvgRape = mean(Rape))
+  # Cluster 2 ca. 3x Murder / 2x Assault / 2x Rape
+    # Safe vs Unsafe seems an intuitive cluster title 
+      # Weights used to project observations along PCs helps this further:
+
+PC12_Weights <- pca_result$rotation[,1:2] %>% round(4)
+
+PC1_Cont <- fviz_contrib(pca_result, "var", axes = 1) # Crime-related
+PC2_Cont <- fviz_contrib(pca_result, "var", axes = 2) # Population-related
 
 
 ### 3) PCA of high-dimensional data ----
