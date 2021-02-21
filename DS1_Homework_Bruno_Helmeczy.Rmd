@@ -1,3 +1,15 @@
+---
+title: "Regressions, PCA, Clustering"
+author: "Bruno Helmeczy"
+date: "21/02/2021"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+  pdf_document: default
+---
+
+```{r setup, message = F, warning = F, echo = T}
 library(tidyverse)
 library(datasets)
 library(MASS)
@@ -6,14 +18,25 @@ library(caret)
 library(data.table)
 library(ggthemes)
 library(ggridges)
+#library()
+library(knitr)
+library(kableExtra)
+
 
 rm(list=ls())
 options(scipen=999)
+theme_set(theme_tufte())
 
 df <- readRDS(url('http://www.jaredlander.com/data/manhattan_Train.rds')) %>%
   mutate(logTotalValue = log(TotalValue)) %>%
   drop_na() %>% dplyr::select(-TotalValue)
 
+```
+
+
+### 1) Supervised Learning with Penalized Models & PCA
+
+```{r helpers, message = F, warning = F, echo = T}
 ### 1) Supervised Learning with Penalized Models & PCA ----
     # Property Values in Manhattan - R 4 Everyone
     #   Predict log-Property Value = logTotalValue
@@ -29,11 +52,6 @@ ColsUniques <- function(dataframe = df) {
   }))  
 }
 ColsUni1 <- ColsUniques()
-
-# Dummies : Area measures -> has, or not 
-# logicals / binaries
-ColsUni1$name[ColsUni1$distinct == 2]
-
 
     # Zone Distr 2-4 -> 90+ %  Missing value
 df$ZoneDist4 <- NULL
@@ -53,8 +71,12 @@ df <- df %>% mutate(
 )
 
 ColsUni2 <- ColsUniques()
+```
 
-# a) Short EDA on data -> Find possible predictors ----
+
+#### 1.a) Short EDA on data -> Find possible predictors 
+
+```{r a , message = F, warning = F, echo = T, fig.align= 'center', fig.height=3,fig.width=6}
 
 # 2 functions to check all histograms / boxplots / LOESS-es in dataset
 Hists <- function() {
@@ -75,7 +97,6 @@ Hists <- function() {
   })
   
 }
-# Hists()
 
 Boxes_n_Scatters <- function() {
   ColsUni1 <- ColsUniques()
@@ -110,7 +131,6 @@ Boxes_n_Scatters <- function() {
   }
   
 }
- Boxes_n_Scatters()
 
 # By default with raw variables, we see Area-related variables to be highly skewed, ----
   #   while in all cases there are a number of zero values. When such areas values are zero,
@@ -174,8 +194,6 @@ df <- df %>% mutate(
             UnitsRes, NumFloors, NumBldgs, OtherArea, FactryArea, StrgeArea,
             GarageArea, RetailArea, OfficeArea, ResArea, ComArea, BldgArea, LotArea))
 
-Boxes_n_Scatters()    
-
 # Correls w logTotalValue
 Cols <- ColsUniques()
 
@@ -189,7 +207,7 @@ Y_Cors <- df %>% dplyr::select(matches(Cols$name[Cols$class %in% c("numeric", "i
   }) %>% rbindlist() %>% as.data.frame() %>% arrange(desc(Corr_w_Y_abs))
 
 
-Y_Cors[1:15,] %>% ggplot(aes(x = reorder(Colname, Corr_w_Y_abs), y = Corr_w_Y_abs,
+TopCors <- Y_Cors[1:15,] %>% ggplot(aes(x = reorder(Colname, Corr_w_Y_abs), y = Corr_w_Y_abs,
                       color = "red")) +
   geom_point(size = 8) + 
   geom_col(width = 0.1, position = "dodge", fill  = "red") +
@@ -205,11 +223,41 @@ Y_Cors[1:15,] %>% ggplot(aes(x = reorder(Colname, Corr_w_Y_abs), y = Corr_w_Y_ab
 # Top 3 correlating variables are LotArea, LotFront & Commercial Area, 
   # w Number of Units in a Building & total Building area making the top 5
 
+TopCors
+```
+
+
+
+
+
+
+#### 1.b) Create Training - Test sets -> 70% test - 30% training 
+
+```{r b , message = F, warning = F, echo = T}
+
+#### Sample vs Holdout sets
+set.seed(1234)
+train_indices <- as.integer(createDataPartition(df$logTotalValue, p = 0.3, list = FALSE))
+data_train <- df[train_indices, ]
+data_holdout <- df[-train_indices, ]
+
+# train control is 10 fold cross validation
+train_control <- trainControl(method = "cv",number = 10,verboseIter = FALSE)  
+
+
+```
+
+
+#### c) Lin. Regr. 2 predict logTotalValue -> 10-fold CV to assess predictive power
+
+```{r c , message = F, warning = F, echo = T}
+
 # We can also expect that a garages value increases, 
     # given how large the building is, how much commercial area is there, etc.
   #   all-in-all I hypothesize a positive feedback loop between all area related variables
     #   I model this via interactions between all area related variables 
         #   -> ( 10 * 9 ) / 2 = 45 interactions 
+
 Vars <- df %>% dplyr::select(matches("area_ln")) %>% colnames()
 
 Interactions <- NULL
@@ -222,21 +270,7 @@ for (i in 1:length(Vars)) {
 }
 Interactions <- paste(Interactions[1:45],collapse =  " + " ) 
 
-
-# b) Create Training - Test sets -> 70 test - 30 training ----
-#### Sample vs Holdout sets
-set.seed(1234)
-train_indices <- as.integer(createDataPartition(df$logTotalValue, p = 0.3, list = FALSE))
-data_train <- df[train_indices, ]
-data_holdout <- df[-train_indices, ]
-
-# train control is 10 fold cross validation
-train_control <- trainControl(method = "cv",number = 10,verboseIter = FALSE)  
-
-
-#### c) Use Lin Reg 2 predict logTotalValue -> 10-fold CV to assess predictive power ----
 Vars <- df %>% dplyr::select(-matches("id|logTotalValue")) %>% colnames()
-
 Formula <- formula(paste0("logTotalValue ~",paste(Vars, collapse = " + ")," + ", Interactions))
 
 #### OLS ####
@@ -246,9 +280,6 @@ ols_model <- train(
   data = data_train,
   method = "lm",
   trControl = train_control)
-
-summary(ols_model)
-
 
 CV_RMSE <- ols_model$resample[,1] %>% mean()
 CV_MAE <- ols_model$resample[,3] %>% mean()
@@ -263,75 +294,18 @@ Hd_RMSE <- RMSE(data_holdout$ols_pred, data_holdout$logTotalValue)
 OLS_Summ <- as.data.frame(rbind(cbind(CV_MAE,CV_RMSE,CV_R2),cbind(Hd_MAE,Hd_RMSE,CV_R2)))
 rownames(OLS_Summ) <- c("CV_Stats","Holdout_Stats")
 colnames(OLS_Summ) <- c("MAE","RMSE","R^2")
-OLS_Summ
 
-# d) Now use Penalized linear Models - LASSO / Ridge / Elastic Net ----
-    # Does best model improve results vs c)
-features <- setdiff(names(df), c("logTotalValue","ID"))
+OLS_Summ %>% kable()
 
-### GLMNET Versions ----
-
-# glmnet needs inputs as a matrix. model.matrix: handles factor variables
-# -1: we do not need the intercept as glmnet will automatically include it
-x_train <- model.matrix( ~ . -1, data_train[, features, with = FALSE])
-dim(x_train)
-
-# how much penalty do we want to apply? select with CV
-lambda_grid <- 10^seq(2,-5,length=100)  
-
-# Ridge -> alpha = 0 ----
-set.seed(1234)
-system.time({
-ridge_model <- cv.glmnet(
-  x = x_train, y = data_train[["logTotalValue"]], 
-  lambda = lambda_grid,
-  family = "gaussian", # for continuous response
-  alpha = 0,  # the ridge model
-  nfolds = 10
-)
-})
-
-plot(ridge_model, xvar = "lambda", main = "Collapsing Coefs. in RIDGE")
-
-best_lambda <- ridge_model$lambda.min
-message(paste0("The optimally chosen penalty parameter: ", best_lambda))
-
-# RMSE for Highest Good Enough & Best Fits
-ridge_model[[2]][c(54,79)]^2
-
-highest_good_enough_lambda <- ridge_model$lambda.1se
-message(paste0("The highest good enough penalty parameter: ", highest_good_enough_lambda))
-
-# LASSO GLM version ----
-set.seed(1234)
-system.time({
-  lasso_model <- cv.glmnet(
-    x = x_train, y = data_train[["logTotalValue"]], 
-    lambda = lambda_grid,
-    family = "gaussian", # for continuous response
-    alpha = 1,  # the ridge model
-    nfolds = 10
-  )
-})
-
-plot(lasso_model, xvar = "lambda", main = "Collapsing Coefs. in LASSO")
-
-best_lambda <- lasso_model$lambda.min
-message(paste0("The optimally chosen penalty parameter: ", best_lambda))
-
-# RMSE for Highest Good Enough & Best Fits
-lasso_model[[2]][c(67,77)]^2
-
-highest_good_enough_lambda <- lasso_model$lambda.1se
-message(paste0("The highest good enough penalty parameter: ", highest_good_enough_lambda))
+```
 
 
+#### d) Now use Penalized linear Models - LASSO / Ridge / Elastic Net
+
+  -   Does best model improve results vs c)
 
 
-
-
-
-
+```{r d , message = F, warning = F, echo = T}
 
 ### CARET versions ----
 ### LASSO ----
@@ -342,7 +316,6 @@ lasso_tune_grid <- expand.grid(
 )
 
 set.seed(1234)
-system.time({
 lasso_fit <- train(
   Formula,
   data = data_train,
@@ -351,7 +324,6 @@ lasso_fit <- train(
   tuneGrid = lasso_tune_grid,
   trControl = train_control
 )
-})
 
 lasso_fit %>% ggplot() +xlim(c(0,1))
 
@@ -363,11 +335,9 @@ lasso_fit$results %>% ggplot(aes(x = lambda)) +
 ### RIDGE ----
 ridge_tune_grid <- expand.grid(
   "alpha" = c(0),
-  "lambda" = 10^seq(2,-5,length=100)  
-)
+  "lambda" = 10^seq(2,-5,length=100))
 
 set.seed(1234)
-system.time({
 ridge_fit <- train(
   Formula,
   data = data_train,
@@ -376,24 +346,13 @@ ridge_fit <- train(
   tuneGrid = ridge_tune_grid,
   trControl = train_control
 )
-})
-
-ridge_fit %>% ggplot()
-
-ridge_fit$results %>% ggplot(aes(x = lambda)) +
-  geom_line(aes(y = RMSE)) +
-  geom_line(aes(y = Rsquared)) + 
-  geom_line(aes(y = MAE))
-
 
 ### Elastic Net ----
 enet_tune_grid <- expand.grid(
   "alpha" = seq(0, 1, by = 0.1),
-  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
-)
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]]))
 
 set.seed(1234)
-system.time({
   enet_fit <- train(
     Formula,
     data = data_train,
@@ -402,18 +361,20 @@ system.time({
     tuneGrid = enet_tune_grid,
     trControl = train_control
   )  
-})
 
-enet_fit$results %>% arrange(RMSE)
-
-
-
+#enet_fit$results %>% arrange(RMSE)
 
 # Based on summary table of Cross-Validated results above, 
   #   OLS has lowest MAE, Elastic Net has Lowest RMSE & Highest R^2, 
       # while dropping 17 variables vs the OLS model
 
 
+```
+
+#### e)  Which model is "simplest one still good enough" ? ----
+
+
+```{r e , message = F, warning = F, echo = T}
 # e)  Which model is "simplest one still good enough" ? ----
     #   Explore adding: selectionFunction = "oneSE" to trainControl
 
@@ -433,7 +394,6 @@ lasso_tune_grid <- expand.grid(
 )
 
 set.seed(1234)
-system.time({
   lasso_fit_1se <- train(
     Formula,
     data = data_train,
@@ -442,7 +402,6 @@ system.time({
     tuneGrid = lasso_tune_grid,
     trControl = train_control_1se
   )
-})
 
 lasso_fit %>% ggplot() +xlim(c(0,1))
 
@@ -458,7 +417,6 @@ ridge_tune_grid <- expand.grid(
 )
 
 set.seed(1234)
-system.time({
   ridge_fit_1se <- train(
     Formula,
     data = data_train,
@@ -467,15 +425,6 @@ system.time({
     tuneGrid = ridge_tune_grid,
     trControl = train_control_1se
   )
-})
-
-ridge_fit %>% ggplot()
-
-ridge_fit$results %>% ggplot(aes(x = lambda)) +
-  geom_line(aes(y = RMSE)) +
-  geom_line(aes(y = Rsquared)) + 
-  geom_line(aes(y = MAE))
-
 
 ### Elastic Net ----
 enet_tune_grid <- expand.grid(
@@ -484,7 +433,6 @@ enet_tune_grid <- expand.grid(
 )
 
 set.seed(1234)
-system.time({
   enet_fit_1se <- train(
     Formula,
     data = data_train,
@@ -493,7 +441,6 @@ system.time({
     tuneGrid = enet_tune_grid,
     trControl = train_control_1se
   )  
-})
 
 #### Summary ----
 
@@ -542,11 +489,16 @@ Penalized_SummTable <- lapply(names(Models), function(x) {
 }) %>% rbindlist() %>% cbind(Nr_Vars)
 
 
-Penalized_SummTable
+Penalized_SummTable %>% kable()
+
+```
 
 
+#### 1. f) Try improve Linear Model w PCA 4 Dim Reduction.
 
-# f) Try improve Linear Model w PCA 4 Dim Reduction. ----
+
+```{r f , message = F, warning = F, echo = T}
+
     #   Center & Scale variables -> use pcr 2 find optimal number of PCs
     #   Does PCA Improve fit over simple linear models
     #     # Many factor variables -> Include 60-90 PCs in search as well
@@ -595,16 +547,19 @@ set.seed(1234)
     preProcess = c("center", "scale"),
     tuneGrid = tune_grid,
     trControl = trctrlWithPCA)
-summary(ols_model_pca)
+
 #     ncomp = 117 is optimal
 
 
-# g) Applying PCA to penalized models via perProcess -> achieves better fit?
+```
+
+
+####  1.g) Applying PCA to penalized models via perProcess -> achieves better fit?
+
+```{r g , message = F, warning = F, echo = T}
+
     #   Include "nzv" to preProcess also -> Drops zero variance features
       # What's your intuition, why is this happening ? 
-
-
-
 
 ### LASSO PCA ----
 
@@ -613,23 +568,14 @@ lasso_tune_grid <- expand.grid(
   "lambda" = 10^seq(0,-5.5,length=100))
 
 set.seed(1234)
-system.time({
   lasso_fit_pca <- train(
     logTotalValue ~ .,
     data = data_train,
     method = "glmnet",
     preProcess = c("center", "scale","nzv","pca"),
     tuneGrid = lasso_tune_grid,
-    trControl = trainControl(method = "cv",number = 10,preProcOptions = list(pcaComp = 117), verboseIter = T)
+    trControl = trainControl(method = "cv",number = 10,preProcOptions = list(pcaComp = 117))
   )
-})
-
-lasso_fit_pca %>% ggplot() +xlim(c(0,1))
-
-lasso_fit_pca$results %>% ggplot(aes(x = lambda)) +
-  geom_line(aes(y = RMSE), color = "blue") +
-  geom_line(aes(y = Rsquared), color = "red") + 
-  geom_line(aes(y = MAE), color = "green") + xlim(c(0.005,1))
 
 ### RIDGE PCA ----
 ridge_tune_grid <- expand.grid(
@@ -638,54 +584,40 @@ ridge_tune_grid <- expand.grid(
 )
 
 set.seed(1234)
-system.time({
   ridge_fit_pca <- train(
     logTotalValue ~ .,
     data = data_train,
     method = "glmnet",
     preProcess = c("center", "scale","nzv","pca"),
     tuneGrid = ridge_tune_grid,
-    trControl = trainControl(method = "cv",number = 10,preProcOptions = list(pcaComp = 117), verboseIter = T)
+    trControl = trainControl(method = "cv",number = 10,preProcOptions = list(pcaComp = 117))
   )
-})
-
-ridge_fit_pca$bestTune
-
-ridge_fit_pca$results %>% arrange(RMSE)
-
-ridge_fit %>% ggplot()
 
 ridge_fit$results %>% ggplot(aes(x = lambda)) +
   geom_line(aes(y = RMSE)) +
   geom_line(aes(y = Rsquared)) + 
   geom_line(aes(y = MAE))
 
-
 ### Elastic Net PCA ----
 enet_tune_grid <- expand.grid(
   "alpha" = seq(0.7, 1, by = 0.03),
-  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
-)
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]]))
 
 set.seed(1234)
-system.time({
   enet_fit_pca <- train(
     logTotalValue ~ .,
     data = data_train,
     method = "glmnet",
     preProcess = c("center", "scale","nzv","pca"),
     tuneGrid = enet_tune_grid,
-    trControl = trainControl(method = "cv",number = 10,preProcOptions = list(pcaComp = 117), verboseIter = T)
+    trControl = trainControl(method = "cv",number = 10,preProcOptions = list(pcaComp = 117))
   )  
-})
 
-enet_fit_pca$results %>% arrange(RMSE)
-enet_fit_pca$bestTune
+```
 
+# h) Select best model trained -> Evaluate your preferred model on test set
 
-
-
-# h) Select best model trained -> Evaluate your preferred model on test set. ----
+```{r h , message = F, warning = F, echo = T}
 
 #### Summary ----
 
@@ -719,7 +651,7 @@ PCA_SummTable <- lapply(names(Models), function(x) {
 }) %>% rbindlist()
 
 
-PCA_SummTable
+PCA_SummTable %>% kable()
 
 #   PCA-d penalized & OLS models worse vs respective regular counterparts
 # Why? we do have lot less variables w PCA 117 was the optimized PCs to use
@@ -739,75 +671,33 @@ Hd_MAE_Pc <-  MAE(data_holdout2$pred_E.NetPca,data_holdout2$logTotalValue) %>% r
 HoldoutSumms <- rbind(cbind(Hd_RMSE,Hd_MAE),cbind(Hd_RMSE_Pc,Hd_MAE_Pc)) %>% as.data.frame()
 
 rownames(HoldoutSumms) <- c("Best_Elastic_Net","Elastic_Net_PCA")
-HoldoutSumms
+HoldoutSumms %>% kable()
 
-### 2) Clustering on the USArrests dataset ----
-  #   Task: Apply Clustering -> make sense of clusters with PCA
-  #   Data used in Class
-
-library(tidyverse)
-library(caret)
-library(skimr)
-library(janitor)
-
-library(factoextra) # provides nice functions for visualizing the output of PCA
-library(NbClust) # for choosing the optimal number of clusters
-
-library(knitr)
-library(kableExtra)
-
-theme_set(theme_tufte())
-
-data <- USArrests
-print(skim(data))
+```
 
 
 
-# a) Think of data pre-processing steps you may / should / would do before Clustering 
-    #   Are there any ?
+```{r, , message = F, warning = F, echo = T}
 
-# b) Determine optimal number of clusters as indicated by NbClust heuristics 
-
-# c) Use K-means to cluster states using Nr. Clusters found in b)
-    #   Plus anything else you think makes sense
-    #   Plot observations colored by Clusters
-      #   Urban population vs another Crime-related Variable
-        #   See e.g. code from class - use factor(kn$cluster) 4 vector of class labels
-
-# d) Do PCA & Get 1st 2 PC coordinates 4 all observations: 
-#   pca_result <- prcomp(data,scale = T)
-#   first_two_pc <- as_tibble(pca_results$x[,1:2])
-
-    #   Plot clusters of choice along co-ordinate system of 1st 2 PCs
-      #   How do clusters relate to these?
+```
 
 
 
+# Appendices
 
-### 3) PCA of high-dimensional data ----
-  #   40 Obs.s. - 1000 var.s
-    #   20 - 20 obs. healthy - diseased patiant obs.s
+### Raw Histograms, Box- & Scatterplots
 
-genes <- read_csv("https://www.statlearning.com/s/Ch10Ex11.csv", col_names = FALSE) %>%
-  t() %>% as_tibble()  # the original dataset is of dimension 1000x40 so we transpose it
-dim(data)
+```{r App 1 , message = F, warning = F, echo = T, fig.height=2.5, fig.width= 5}
 
-# a) Perform PCA on this data w scaling features
+Hists() 
 
-# b) Visualize data points in the space of 1st 2 PCs - fviz_pca_ind f(x)
-    #   What can you see in the figure ?
-
-# c) Which indy features can matter most 2 seperate diseased from healthy ? 
-    #  Strategy 2 answer:
-
-      #   We see PC1 matters A LOT
-      #   Look at which features have HIGH LOADING 4 PC1 
-          #   i.e. largest absolute value co-ordinates -> use $rotation
-          # choose these 2 features -> plot observations across these on co-ordinates
-            # What can you see ?
+```
 
 
+### Transformed Box- & Scatterplots
 
+```{r App 2 , message = F, warning = F, echo = T, fig.height=2.5, fig.width= 5}
 
+Boxes_n_Scatters()
 
-
+```
