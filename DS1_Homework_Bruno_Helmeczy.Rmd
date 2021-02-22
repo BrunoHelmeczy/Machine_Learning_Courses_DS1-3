@@ -8,6 +8,14 @@ output:
     highlight: github
   pdf_document: default
 ---
+This report summarizes my homework made for the Data Science 1: Machine Learning concepts class at the Central European University's MSc Business Analytics program. The 1st Chapter looks to predict property valuations in Manhattan, New York, using with OLS & Penalized models: LASSO, Ridge, & Elastic Net regression. 
+
+The chapter also extends to finding the "simplest still good enough" model specifications, and executing said models using the datas' principle components, after preProcessing the dataset via Principal Component Analysis. The final model chosen for Chapter 1 is the best Elastic Net model, with RMSE 0.5, MAE 0.38 & R-squared of 89.68% performance during 10-fold Cross-Validation. Tested on the holdout set (70% of all observations), the model remained stable, indicating robust expected performance. 
+
+The 2nd Chapter looks to cluster US states, using the USArrests dataset, after a brief principal component analysis. I first found the optimal number of clusters being 2, then calculated conditional column means to find clusters' defining characteristics. Plotting the data along the 1st 2 principal components shows a distinct seperation, while the final visualizations shows weights used to calculate either Principal Component. One can see, based on grouped means table & weights used, that principal component 1 is most heavily based on states' crime-related statistic, while principal component 2 on population size. Plotting the cluster-colored data along these PCs shows a clear line of seperation at ca. PC1 = 0.    
+
+
+
 
 ```{r setup, message = F, warning = F, echo = T}
 library(tidyverse)
@@ -18,9 +26,11 @@ library(caret)
 library(data.table)
 library(ggthemes)
 library(ggridges)
+library(gridExtra)
 library(knitr)
 library(kableExtra)
-
+library(factoextra) # provides nice functions for visualizing the output of PCA
+library(NbClust) # for choosing the optimal number of clusters
 
 rm(list=ls())
 options(scipen=999)
@@ -34,6 +44,11 @@ df <- readRDS(url('http://www.jaredlander.com/data/manhattan_Train.rds')) %>%
 
 
 ### 1) Supervised Learning with Penalized Models & PCA
+
+As said, the 1st chapter looks to predict Manhattan properties' total valuations, specifically logTotalValue, based on an array of features, including various zoning districts, health or police area codes, and size of special-purpose areas within a building, e.g. Commercial / Garage area. 
+
+As part of cleaning my data, my 1st helper function helps me keep an overview, by returning column names, classes & number of distinct values - possible to call anytime, thus useful as a status checkup, or returning the current column names to loop through in later functions. I also delete Zoning Districts 2-4 due to 60%+ missing values in each, transform Yes / No & Logical variables to 1s & 0s, and specify Council district, Health Area Code & Police Prct as categorical variables, i.e. factors. I do so based on the data description available on github [(here)](https://github.com/NYCPlanning/db-pluto/blob/master/metadata/Data_Dictionary.md?fbclid=IwAR0lNCMLS6ySPi-eXCoVyNbePj9klTA9KYM91HJ36B3YeQt1l4-9EbIqG3s).
+
 
 ```{r helpers, message = F, warning = F, echo = T}
 ### 1) Supervised Learning with Penalized Models & PCA ----
@@ -75,6 +90,8 @@ ColsUni2 <- ColsUniques()
 
 #### 1.a) Short EDA on data -> Find possible predictors 
 
+As a 1st step I explored variables' frequency distributions, and association patterns with the target variable. Given the number of variables & that I wanted to re-check association patterns after possible transformations, I wrote 2 functions to iterate through all columns and plot each, using the ColsUniques() function defined above. For the 2nd function, Boxes_n_Scatters() I use boxplots when the X variable used is categorical or binary, and a scatter plot plus a LOESS curve when numeric. Thus, I found most area- or size-related variables to be skewed with a long right-tail, so log-transformed them, while creating dummy variables to indicate 0s in these variables, meaning e.g. in case of Garage area, that a property does not have a garage. For log-transformations, I added an insignificant amount to avoid infinite values, & finally I chose to only plot top correlations with the target variable. 
+
 ```{r a , message = F, warning = F, echo = T, fig.align= 'center', fig.height=3,fig.width=6}
 
 # 2 functions to check all histograms / boxplots / LOESS-es in dataset
@@ -101,7 +118,6 @@ Boxes_n_Scatters <- function() {
   ColsUni1 <- ColsUniques()
   
 # Box Plots
-#  x <- "SchoolDistrict"
   lapply(df %>% dplyr::select(-matches("id|logTotalValue")) %>%  colnames(), function(x) {
       if (  (ColsUni1$class[ColsUni1$name == x] %in% c("factor","logical") ) | (df[,x] %>% unique() %>% nrow() == 2)  ) {
     plot <- df %>% ggplot()  +
@@ -128,7 +144,6 @@ Boxes_n_Scatters <- function() {
     print(plot)  
     print(paste0("Printing plot: ",i))
   }
-  
 }
 
 # By default with raw variables, we see Area-related variables to be highly skewed, ----
@@ -225,7 +240,7 @@ TopCors <- Y_Cors[1:15,] %>% ggplot(aes(x = reorder(Colname, Corr_w_Y_abs), y = 
 TopCors
 ```
 
-
+From the plot above, 1 can see that the 2 strongest correlating binary-variables with logTotalValue are whether we are talking about a high-rise building, and whether the building has commercial area. In terms of continuous variables, total land area, land area facing streets, commercial area, number of total units, & building area show the strongest log-linear association pattern, indicating possibly strong predictors.
 
 #### 1.b) Create Training - Test sets -> 70% test - 30% training 
 
@@ -243,8 +258,12 @@ train_control <- trainControl(method = "cv",number = 10,verboseIter = FALSE)
 
 ```
 
+The exercise indicated 70% test to be used. I use createDataPartition() from caret to get row indices, & use them to split the dataset to train- & holdout samples.  
 
-#### c) Lin. Regr. 2 predict logTotalValue -> 10-fold CV to assess predictive power
+
+#### 1 c) Lin. Regr. 2 predict logTotalValue -> 10-fold CV to assess predictive power
+
+Below I test an OLS linear regression model, to be used as baseline vs following models below. To fully-define my feature space, I wrote a double-loop to interact all area-related variables, yielding (10 * 9)/2 = 45 interactions in total. I paste these together  
 
 ```{r c , message = F, warning = F, echo = T}
 
@@ -689,7 +708,7 @@ data_scaled <- scale(data) %>% as.data.frame()
 
 #### 2. b) Determine optimal number of clusters as indicated by NbClust heuristics 
 
-```{r 2b , message = F, warning = F, echo = T}
+```{r 2b , message = F, warning = F, echo = T,results="hide", fig.align='center', fig.height=3}
 
 nb <- NbClust(data_scaled, method = "kmeans", min.nc = 2, max.nc = 10, index = "all")
 
@@ -705,11 +724,15 @@ NrClustsRec <- Cluster %>%
          y = "Nr. Times Reccommended",
          x = "Nr. of Clusters Recommended")
 
+Cluster %>% kable()
+
+NrClustsRec 
+
 ```
 
 #### 2 c) Use K-means to Cluster states using Nr. Clusters found in b)
 
-```{r 2c , message = F, warning = F, echo = T}
+```{r 2c , message = F, warning = F, echo = T, fig.height=3}
 
 km <- kmeans(data_scaled, centers = nb$Best.partition %>% unique() %>% length(),
              nstart = 30)
@@ -727,23 +750,21 @@ Assault <- ggplot(data_w_clusters, aes(x = UrbanPop, y = Assault, color = cluste
 # Rape
 Rape <- ggplot(data_w_clusters, aes(x = UrbanPop, y = Rape, color = cluster)) +  geom_point()
 
-
+grid.arrange(Murder, Assault, Rape, ncol = 3)
 
 ```
 
-#### 2 d) Do PCA & Get 1st 2 PC coordinates 4 all observations: ----
+#### 2 d) Do PCA & Get 1st 2 PC coordinates 4 all observations: 
 
 
 ```{r 2d , message = F, warning = F, echo = T }
 pca_result <- prcomp(data,scale = T)
 
-pca_result$x[,1:2]
-pca_result$rotation %>% colSums()
 Cities <- rownames(pca_result$x)
 
 first_two_pc <- pca_result$x[,1:2] %>% as.data.frame()
-first_two_pc <- first_two_pc %>% mutate(cluster = factor(km$cluster),
-                                        City = Cities)
+first_two_pc <- first_two_pc %>% 
+  mutate(cluster = factor(km$cluster),City = Cities)
 rownames(first_two_pc) <- Cities
 
     #   Plot clusters of choice along co-ordinate system of 1st 2 PCs
@@ -774,7 +795,7 @@ ClusterTable %>% kable()
 
 PC12_Weights %>% kable()
 
-gridExtra::grid.arrange(PC1_Cont,PC2_Cont, ncol = 2)
+grid.arrange(PC1_Cont,PC2_Cont, ncol = 2)
 
 
 ```
@@ -783,7 +804,7 @@ gridExtra::grid.arrange(PC1_Cont,PC2_Cont, ncol = 2)
 
 ### Raw Histograms, Box- & Scatterplots
 
-```{r App 1 , message = F, warning = F, echo = T, fig.height=2.5, fig.width= 5}
+```{r App 1 , message = F, warning = F, echo = T, results = "hide", fig.height=2.5, fig.width= 5}
 
 Hists() 
 
@@ -792,7 +813,7 @@ Hists()
 
 ### Transformed Box- & Scatterplots
 
-```{r App 2 , message = F, warning = F, echo = T, fig.height=2.5, fig.width= 5}
+```{r App 2 , message = F, warning = F, echo = T, results = "hide", fig.height=2.5, fig.width= 5}
 
 Boxes_n_Scatters()
 
