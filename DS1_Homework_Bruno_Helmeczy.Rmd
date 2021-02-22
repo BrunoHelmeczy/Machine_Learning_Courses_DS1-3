@@ -146,15 +146,6 @@ Boxes_n_Scatters <- function() {
   }
 }
 
-# By default with raw variables, we see Area-related variables to be highly skewed, ----
-  #   while in all cases there are a number of zero values. When such areas values are zero,
-  #   it implies there is no such aspect of the building, e.g. no garage.
-  #   It is in and of itself a value driver if a garage exists 
-      #   (reflected by all '_Zero' ending variables) 
-  #   While also flags those observations where the raw values were zero before log-transforms
-    # we thus can interpret coefficient parameters as 
-      #   % higher area being associated with on average % higher total value  
-
 df <- df %>% mutate(
   BuiltFAR_Zero   = ifelse(BuiltFAR == 0, 1, 0),
   BldgDepth_Zero  = ifelse(BldgDepth == 0,1,0),
@@ -258,12 +249,12 @@ train_control <- trainControl(method = "cv",number = 10,verboseIter = FALSE)
 
 ```
 
-The exercise indicated 70% test to be used. I use createDataPartition() from caret to get row indices, & use them to split the dataset to train- & holdout samples.  
+The exercise indicated 70% test to be used. I use createDataPartition() from caret to get row indices, & use them to split the dataset to train- & holdout samples. I also define my base train_control parameters, i.e. 10-fold cross-validation.  
 
 
 #### 1 c) Lin. Regr. 2 predict logTotalValue -> 10-fold CV to assess predictive power
 
-Below I test an OLS linear regression model, to be used as baseline vs following models below. To fully-define my feature space, I wrote a double-loop to interact all area-related variables, yielding (10 * 9)/2 = 45 interactions in total. I paste these together  
+Below I test an OLS linear regression model, to be used as baseline vs following models below. To fully-define my feature space, I wrote a double-loop to interact all area-related variables, yielding (10 * 9)/2 = 45 interactions in total. I paste these together with all variable names except ID & logTotalValue to specify my formula used,  run the model using train(), & summarize cross-validated performance in the table below. 
 
 ```{r c , message = F, warning = F, echo = T}
 
@@ -306,18 +297,22 @@ Hd_MAE <- MAE(data_holdout$ols_pred, data_holdout$logTotalValue)
 Hd_RMSE <- RMSE(data_holdout$ols_pred, data_holdout$logTotalValue)
 
 # OLS Summary - Cross-Validation & Holdout data
-OLS_Summ <- as.data.frame(rbind(cbind(CV_MAE,CV_RMSE,CV_R2),cbind(Hd_MAE,Hd_RMSE,CV_R2)))
-rownames(OLS_Summ) <- c("CV_Stats","Holdout_Stats")
+OLS_Summ <- as.data.frame(cbind(CV_MAE,CV_RMSE,CV_R2))
+rownames(OLS_Summ) <- c("OLS_CV_Stats")
 colnames(OLS_Summ) <- c("MAE","RMSE","R^2")
 
 OLS_Summ %>% kable()
 
 ```
 
+1 can see the OLS models cross-validated performance summary statistics above. The OLS model, modelling the percentage change in logTotalValue reached an R-squared of 88.8%, with root mean square error of 52.2% & mean absolute error of 37.7%, giving a solid baseline model.
+
 
 #### d) Now use Penalized linear Models - LASSO / Ridge / Elastic Net
 
-  -   Does best model improve results vs c)
+  -   Does best model improve results vs c) ?
+  
+Below I specify 3 models using train() from caret, a LASSO, a Ridge, & their combination, an Elastic Net. I do so by using the "glmnet" method, & preProcess the data my normalizing it to standard normal distributions. I specify a tuning grid for each model, searching for the optimal lambda parameter, the penalty term essentially controlling how strongly beta coefficients are shrinked towards 0. Note, readers can find summary statistics for these models under exercise 1.e) together with the "simplest still good enough" models. Eventually, the full Elastic Net model improved the OLS model the most, reaching R-squared of 89.7%, RMSE of 50.3% & MAE of 37.7%, however is very closely followed by LASSO. The LASSO and Elastic Net differ in results by 0.3% MAE, 0.01% in R-squared, & nothing in terms of RMSE. Overall, the Elastic Net represents a 2% RMSE improvement vs the baseline OLS model, improving results. 
 
 
 ```{r d , message = F, warning = F, echo = T}
@@ -339,11 +334,6 @@ lasso_fit <- train(
   tuneGrid = lasso_tune_grid,
   trControl = train_control
 )
-
-lasso_fit$results %>% ggplot(aes(x = lambda)) +
-  geom_line(aes(y = RMSE), color = "blue") +
-  geom_line(aes(y = Rsquared), color = "red") + 
-  geom_line(aes(y = MAE), color = "green") + xlim(c(0,1))
 
 ### RIDGE ----
 ridge_tune_grid <- expand.grid(
@@ -386,6 +376,7 @@ set.seed(1234)
 
 #### e)  Which model is "simplest one still good enough" ? ----
 
+Following from the models above, I search for the "simplest still good enough" model specifications for the penalized models above. This means I look for the model that is on average as good as the truly best model minus 1 standard error of the chosen performance metric. I apply the above by re-specifying my train_control parameters, this time including the selectionFunction = "oneSE" argument, which does exactly what I just described, & then re-running all 3 penalized models. Please see the models' summary statistic below, beneath the code snippet.  
 
 ```{r e , message = F, warning = F, echo = T}
 # e)  Which model is "simplest one still good enough" ? ----
@@ -499,8 +490,12 @@ Penalized_SummTable %>% kable()
 
 ```
 
+1 can see from the table above that the best-performing model is still the original Elastic Net. Among simpler but still good enough models however, the LASSO poses the lowest MAE (38.3%), RMSE (50.8%) & highest R-squared (89.5%), meanwhile using 59 less variables vs the best LASSO model, & 93 less variables then originally specified. Do note that 11 variables returned NAs in OLS due to zero-variances. Thus, among simpler but still good enough models, LASSO is the best choice. 
+
 
 #### 1. f) Try improve Linear Model w PCA 4 Dim Reduction.
+
+Next up, is trying to improve the Linear Model by first performing principal component analysis. To do so however, I first need to convert my factor variables to series of dummies, from which distances can be calculated. I use dummyVars() from caret to define these dummies, & re-create my original dataframe called tdf. Then I re-create the training & holdout sets, and use prcomp() to evaluate principal components. I found the first 35 PCs to explain 99.9% of total variance, & 60 PCs to explain 99.99% of variance. The number of principal components used to arrive at the best OLS model was 117, so this was the number of PCs I used to re-estimate all penalized models as well. To see a comparison of all PCA-based models vs their original "best" counterparts, please visit the table under 1.h). For the OLS model, the decline performance is substantial: over 13% decline in MAE, over 14% decline in RMSE, & 6.8% decline in R-squared. 
 
 
 ```{r f , message = F, warning = F, echo = T}
@@ -530,9 +525,7 @@ PCA_tdf <- prcomp(tdf)
 Summary <- PCA_tdf %>% summary()
 PCA_Summ_df <- Summary$importance %>% rbind() %>% as.data.frame() %>% transpose() %>% cbind(index = 1:300)
 colnames(PCA_Summ_df) <- c("StDev","Prop%_Variance","CumSum_Prop%_Variance","index")
-
 # PC35 -> 99.9% of total variance -> PC60 = 99.99%
-
 
 trctrlWithPCA <- trainControl(method = "cv", number = 10, verboseIter = FALSE)
 tune_grid <- data.frame(ncomp = 35:120)
@@ -548,11 +541,12 @@ set.seed(1234)
 
 #     ncomp = 117 is optimal
 
-
 ```
 
 
 ####  1.g) Applying PCA to penalized models via perProcess -> achieves better fit?
+
+After estimating the optimal number of PCs on the OLS model, this number was used on penalized models, by adding preProcOptions to train_control. Also once removing near-zero variances, 121 Principal Components remained. Overall, penalized models also declined in performance vs their best-fit formulations, though less starkly vs the OLS models. The RIDGE pca model also performed very similarly to the LASSO, while in their original formulations the Ridge model was over 2% worse in MAE & RMSE, and 1% lower in R-squared. Also, the Elastic Net using PCA return an optimal alpha parameter of 1, i.e. it reduced to a LASSO model, returning identical performance metrics as the LASSO pca. As such, the LASSO pca is the best model using Principal Component Analysis.  
 
 ```{r g , message = F, warning = F, echo = T}
 
@@ -646,17 +640,9 @@ PCA_SummTable <- lapply(names(Models), function(x) {
 
 PCA_SummTable %>% kable()
 
-#   PCA-d penalized & OLS models worse vs respective regular counterparts
-# Why? we do have lot less variables w PCA 117 was the optimized PCs to use
-# 35 PCs capture 99.9% of Var, 60 99.99%  - other 182-239 vars not really relevant
-# Indeed it might be the case the purely best model is well-overfitted
-# Reccommendation: Elastic_net 
-#   Sheer curiosity: test also Elastic_Net_PCA
-
-
-
 ```
 
+Due to the reasons outlined above, the best-fit Elastic Net model is my final recommendation, boasting the lowest MAE (0.3768) , RMSE (0.5025) & highest R-squared metrics (89.68%). Only out of sheer curiosity, I also test the Elastic Net model using PCA on the holdout set. Below 1 can see the Mean Absolute Error & Root Mean Square Error statistics on the holdout. The best-fit Elastic Net model was stable in performance, with MAE 0.3777 & RMSE 0.5031, meaning we managed to not overfit my model to the data. The Elastic Net model using PCA tested RMSE = 0.5386, &  MAE = 0.399, even slightly improving vs its cross-validated results visible above.
 
 
 ```{r h2 , message = F, warning = F, echo = T}
@@ -675,6 +661,8 @@ HoldoutSumms %>% kable()
 ```
 
 #### 2) Clustering on the USArrests dataset 
+
+The 2nd chapter of this exercise uses the USArrests dataset, to cluster US states. As part of understanding the data, I use the GGally librarys' ggpairs function to get scatter plot, variable density-plots & correlations simultaneously. The plots below 1st weakly skewed variables except for Urban Population, & moderate to strong correlations among Murders & Assault, Murders & Rape, and Assault & Rape. 1 could argue the reason for this is some assaults escalating to rapes to occur, & some rapes to also result in murders.
 
 ```{r e2, message = F, warning = F, echo = T, fig.align='center'}
   #   Task: Apply Clustering -> make sense of clusters with PCA
@@ -700,6 +688,7 @@ ggally
 
 #### 2. a) Any data pre-processing you may / should / could / would do ? 
 
+To be able to calculate Principal Components, or perform K-means clustering, I scale the data with the stats librarys' scale() function.
 
 ```{r 2a , message = F, warning = F, echo = T}
       #   Scale variables 
@@ -707,6 +696,8 @@ data_scaled <- scale(data) %>% as.data.frame()
 ```
 
 #### 2. b) Determine optimal number of clusters as indicated by NbClust heuristics 
+
+To determine optimal number of clusters for K-means clustering, I use the NbClust() function, trying any number of clusters from 2 to 10. 
 
 ```{r 2b , message = F, warning = F, echo = T,results="hide", fig.align='center', fig.height=3}
 
@@ -724,13 +715,15 @@ NrClustsRec <- Cluster %>%
          y = "Nr. Times Reccommended",
          x = "Nr. of Clusters Recommended")
 
-Cluster %>% kable()
-
 NrClustsRec 
 
 ```
 
+The plot above depicts the distribution of voted cluster numbers. 2 is overwhelmingly in favor & is therefore my choice.
+
 #### 2 c) Use K-means to Cluster states using Nr. Clusters found in b)
+
+Below I use the most voted number of clusters (obtained fomr above) to cluster observations, with 30 starting points. I add the resulting cluster designations to my original data frame, & color the clusters while depicting Urban Population vs Murder, Assault & Rape. The plots below show that largely, K-means seems to assign clusters based on these 3 variables. 
 
 ```{r 2c , message = F, warning = F, echo = T, fig.height=3}
 
@@ -756,6 +749,7 @@ grid.arrange(Murder, Assault, Rape, ncol = 3)
 
 #### 2 d) Do PCA & Get 1st 2 PC coordinates 4 all observations: 
 
+In this final section, the 1st 2 Principal Components are obtain from the raw data, & data points are visualized from perspective of the 2 principal components, after assigned clusters are added to the dataframe. The plot below shows a clear line of de-markation at ca. PC1 = -0.1. The question remaining is what these principal components do most significantly take into account, as well as what seperates these identified clusters.
 
 ```{r 2d , message = F, warning = F, echo = T }
 pca_result <- prcomp(data,scale = T)
@@ -799,6 +793,9 @@ grid.arrange(PC1_Cont,PC2_Cont, ncol = 2)
 
 
 ```
+
+A 1st table above calculates variable mean by cluster. 1 can see that cluster 1 vs cluster 2, the average number of murders is 2.5x, average number of assaults & rapes are 2x. Thus, 1 way to interpret the clusters may be Safe vs Unsafe. The 2nd table shows the explicit weights used per variable to derive observation coordinates from perspective of the first 2 Principal Components, while the bar charts that follow depict variable significance/contribution for a PC. Indeed, 1 can see that the 1st Principal Component primarily takes into account crime-related variables, while the 2nd PC overwhelmingly focuses on Urban Population.
+
 
 # Appendices
 
