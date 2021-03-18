@@ -3,6 +3,19 @@ rm(list=ls())
 library(tidyverse)
 library(data.table)
 library(caret)
+library(gbm)
+library(rpart.plot)
+library(MLeval)
+library(pROC)
+library(caTools)
+library(ggplot2)
+library(viridis)
+library(ggthemes)
+library(dplyr)
+
+
+
+
 
 # 1) TREE ENSEMBLE MODELS - 7points ----
 df <- as_tibble(ISLR::OJ)
@@ -17,14 +30,17 @@ data_train <- df[train_indices, ]
 data_holdout <- df[-train_indices, ]
 
 # train control is 5 fold cross validation
-train_control <- trainControl(method = "cv",number = 5,verboseIter = FALSE,
-                              summaryFunction = twoClassSummary, classProbs = T,
+train_control <- trainControl(method = "cv",
+                              number = 5,
+                              verboseIter = FALSE,
+                              summaryFunction = twoClassSummary, 
+                              classProbs = T,
                               savePredictions = T) 
 
 # Train a decision tree as a benchmark model. 
         # Plot the final model and interpret the result 
             # -> (using rpart and rpart.plot is an easier option)
-library(rpart.plot)
+
 
 #### CART ####
 set.seed(1234)
@@ -39,7 +55,7 @@ cart_model <- train(
 # Tree Plot
 rpart.plot(cart_model$finalModel)
 
-library(MLeval)
+
 
 # Evaluation
 x <- evalm(cart_model)
@@ -155,7 +171,7 @@ results <- resamples(final_models) %>% summary()
 
 # 1 d) Choose best model & Plot ROC curve for best model based on test set. ----
       # Calculate & Interpret AUC
-library(pROC)
+
 CV_AUC_folds <- list()
 for (model_name in names(final_models)) {
   
@@ -181,11 +197,12 @@ for (model_name in names(final_models)) {
 AUCs <- CV_AUC %>% rbind() 
 
 ## ROC Plot with built-in package 
-library(caTools)
+
 rf_pred <- predict(rf_model_1b, data_holdout, type="prob")
 colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
 
 ## ROC plot with own function
+colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
 data_holdout[,"best_model_pred"] <- rf_pred[,"CH"]
 
 roc_obj_holdout <- roc(data_holdout$Purchase, data_holdout$best_model_pred)
@@ -210,15 +227,14 @@ createRocPlot <- function(r, plot_name) {
   roc_plot
 }
 
-library(viridis)
-library(ggthemes)
+
 
 FinModelROC <- createRocPlot(roc_obj_holdout, "ROC curve for best model (RF)")
 
 
 # 1 e) Inspect variable importance plots for the 3 models ----
     # Similar variables found most important by all 3 models ? 
-library(gbm)
+
 
 VarImpPlots <- function(named_model_list) {
   lapply(names(named_model_list), function(x) {
@@ -324,7 +340,8 @@ VarImpPlots(GBMs_2c)
 h2o.shutdown()
 Y
 # 3) STACKING - 10 points ----data <- read_csv("KaggleV2-May-2016.csv") ----
-data <- read_csv("KaggleV2-May-2016.csv")
+myurl <- "https://raw.githubusercontent.com/BrunoHelmeczy/Machine_Learning_Courses_DS1-3/main/DS2/KaggleV2-May-2016.csv"
+data <- read_csv(myurl)
 
 # some data cleaning
 data <- select(data, -one_of(c("PatientId", "AppointmentID", "Neighbourhood"))) %>%
@@ -343,6 +360,9 @@ data <- mutate(
 data <- filter(data, between(age, 0, 95), hours_since_scheduled >= 0) %>%
   select(-one_of(c("scheduled_day", "appointment_day", "sms_received")))
 
+# data <- data %>% mutate(gender = factor(gender, levels = c("F","M"), labels = c(1,2)))
+# data <- data[,c("no_show")] %>% cbind(sapply(data %>% select(-no_show), as.numeric)) %>% as.data.frame()
+# data <- sapply(data, as.numeric) %>% as.data.frame()
 
 # 3 a) Train / Validation / Test Sets - 5% / 45 / 50 -----
 
@@ -351,53 +371,305 @@ data <- filter(data, between(age, 0, 95), hours_since_scheduled >= 0) %>%
 set.seed(1)
 test_indices <- as.integer(createDataPartition(data$no_show, p = 0.5, list = FALSE))
 data_test <- data[test_indices, ]
-data_model <- df[-test_indices, ]
+data_model <- data[-test_indices, ]
+
 
 set.seed(1)
-train_indices <- as.integer(createDataPartition(data$no_show, p = 0.1,list = F))
+train_indices <- as.integer(createDataPartition(data_model$no_show, p = 0.1,list = FALSE))
 data_train <- data_model[train_indices,]
 data_validate <- data_model[-train_indices,]
 data_model <- NULL
 
-# train control is 5 fold cross validation
-train_control <- trainControl(method = "cv",number = 5,verboseIter = FALSE,
-                              summaryFunction = twoClassSummary, classProbs = T,
-                              savePredictions = T) 
+# train control is 5 fold cross validation ----
+MyFolds <- createFolds(data_train$no_show,k = 5) 
+
+train_control <- trainControl(index = MyFolds,
+                              verboseIter = FALSE,
+                              summaryFunction = twoClassSummary, 
+                              classProbs = T,
+                              savePredictions = "final") 
 
 # 3 b) Train benchmark model of choice - rf / gbm / glm ----
   # Evaluate on validation set - lets do GLM - Elastic Net
 
-Benchmark_GLM <- train(
-  no_show ~ .,
-  data = data_train,
-  method = ,
-  metric = "ROC",
-  trControl = train_control,
-  tuneGrid = ENet_tunegrid
-  
+
+# My E-Net Grid & Model ----
+ENet_tunegrid <- expand.grid(
+ "alpha"  = seq(0, 1, by = 0.1),
+ "lambda" = 10^seq(2,-5,length=100)
 )
+
+Formula <- paste0("no_show ~ ", data %>% select(-no_show) %>% colnames() %>% paste(collapse = " + "))
+ 
+Benchmark_GLM <- train(
+  formula(Formula),
+  data = data_train,
+  method = "glmnet",
+  family = "binomial",
+  preProcess = c("center","scale"),
+  trControl = train_control,
+  tuneGrid = ENet_tunegrid,
+  na.action=na.exclude
+)
+
+x <- evalm(Benchmark_GLM)
+
+Preds <- Benchmark_GLM$pred[,"pred"][Benchmark_GLM$pred$alpha == Benchmark_GLM$bestTune[,"alpha"] & Benchmark_GLM$pred$lambda == Benchmark_GLM$bestTune[,"lambda"]]
+Obss <- Benchmark_GLM$pred[,"obs"][Benchmark_GLM$pred$alpha == Benchmark_GLM$bestTune[,"alpha"] & Benchmark_GLM$pred$lambda == Benchmark_GLM$bestTune[,"lambda"]]
+
+table(Preds,Obss)
+
+Benchmark_GLM$pred[,"pred"][Benchmark_GLM$pred$lambda == Benchmark_GLM$bestTune[,"lambda"]]
+Benchmark_GLM$bestTune[,"lambda"]
+
+table(data_train$no_show)
 
 # 3 c) Build min 3 models of different model families - w cross-validation ----
     # keep cross-validated predictions
 
-#### Forest ####
+#### 1) Random Forest ####
+rf_tune_grid <- expand.grid(
+  .mtry = 2:5,
+  .splitrule = "gini",
+  .min.node.size = seq(5,45,by = 5) 
+)
 
-#### GBM ####
+RF_model_3c <- train(
+  formula(Formula),
+  data = data_train,
+  method = "ranger",
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid = rf_tune_grid,
+  na.action=na.exclude
+)
 
-#### XGBoost ####
+x <- RF_model_3c %>% evalm()
+x$roc
+x$stdres
 
 
 
+#### 2) GBM ####
+gbm_grid <-  expand.grid(
+  interaction.depth = c(1:5)*2-1, # complexity of the tree
+  n.trees = 500, # number of iterations, i.e. trees
+  shrinkage = c(1,5,10)*0.0001, # learning rate: how quickly the algorithm adapts
+  n.minobsinnode = seq(5,25,by = 5) # the minimum number of training set samples in a node to commence splitting
+)
+
+set.seed(1234)
+GBM_model_3c <- train(
+  formula(Formula),
+  data = data_train,
+  method = "gbm",
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= gbm_grid)
+
+x <- evalm(GBM_model_3c)
+x$roc
+
+
+#### 3) XGBoost ####
+xgb_grid <-  expand.grid(
+  nrounds=c(500,750),
+  max_depth = (2:4)*2+1,
+  eta = c(0.03,0.05, 0.06),
+  gamma = c(0.01),
+  colsample_bytree = seq(75,95,by =10 )/100,  
+  min_child_weight = (1:5)/10,
+  subsample = c(0.75)
+)
+
+set.seed(1234)
+XGB_model_3c <- train(
+  formula(Formula),
+  data = data_train,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid
+)
+
+
+x <- XGB_model_3c %>% evalm()
+x$roc
+x$stdres
+
+
+
+#### 4) KNN ####
+
+set.seed(1234)
+KNN_model_3c <- train(
+  formula(Formula),
+  data = data_train,
+  method = "knn", 
+  metric = "ROC",
+  preProcess = c("center","scale"),
+  trControl = train_control,
+  tuneGrid= data.frame(k = c((1:21)*2-1))
+)
+
+#### 5) Radial SVM ####
+set.seed(1234)
+SVM_Radial_3c <- train(
+  formula(Formula), 
+  data = data_train, 
+  method = "svmRadial",
+  metric = "ROC",
+  trControl=train_control,
+  tuneLength = 10
+)
 
 # 3 d) Evaluate Validation set performance of each model ----
+final_models_3c <- list(
+  "Benchmark_Enet" = Benchmark_GLM,
+  "Random_Forest"  = RF_model_3c,
+  "Grad_Boost"     = GBM_model_3c,
+  "XGBoost"        = XGB_model_3c,
+  "KNN"            = KNN_model_3c,
+  "SVM_Non_Lin"    = SVM_Radial_3c
+)
 
 
-# 3 e) How large are correlations of predicted scores on the validation set
+results <- resamples(final_models_3c) %>% summary()
+
+resamples(final_models_3c) %>% xyplot()
+
+# Old E.g. -----
+CV_AUC_folds <- list()
+
+model_name <- names(final_models_3c)[1]
+for (model_name in names(final_models_3c)) {
+  
+  auc <- list()
+  model <- final_models_3c[[model_name]]
+  fold <- "Fold1"
+  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    cv_fold <- model$pred %>% filter(Resample == fold)
+    TuneParams <- model$bestTune %>% colnames()
+
+    for (param in TuneParams) {
+      cv_fold <- cv_fold[cv_fold[,param] == model$bestTune[,param],]
+    }
+
+    roc_obj <- roc(cv_fold$obs, cv_fold$No)
+    auc[[fold]] <- as.numeric(roc_obj$auc)
+  }
+  
+  CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
+                                           "AUC" = unlist(auc))
+}
+
+CV_AUC <- list()
+for (model_name in names(final_models_3c)) {
+  CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
+}
+
+AUCs <- CV_AUC %>% cbind() 
+colnames(AUCs) <- "Model_AUC"
+
+#-----------
+model <- names(final_models_3c)[1]
+for (model in names(final_models_3c)) {
+  Pred <- predict(final_models_3c[[model]],newdata = data_validate, type = "prob")
+  data_validate[,paste0("Pred_",model)] <- Pred[,""]
+  
+  colAUC(Pred, data_validate$no_show, plotROC = TRUE)
+}
+
+rf_pred <- predict(rf_model_1b, data_holdout, type="prob")
+colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
+
+roc(data_validate[,paste0("Pred_",model)], data_validate$no_show)
+
+## ROC plot with own function
+colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
+data_holdout[,"best_model_pred"] <- rf_pred[,"CH"]
+
+roc_obj_holdout <- roc(data_holdout$Purchase, data_holdout$best_model_pred)
+
+createRocPlot <- function(r, plot_name) {
+  all_coords <- coords(r, x="all", ret="all", transpose = FALSE)
+  
+  roc_plot <- ggplot(data = all_coords, aes(x = fpr, y = tpr)) +
+    geom_line(color='blue', size = 0.7) +
+    geom_area(aes(fill = 'red', alpha=0.4), alpha = 0.3, position = 'identity', color = 'blue') +
+    scale_fill_viridis(discrete = TRUE, begin=0.6, alpha=0.5, guide = FALSE) +
+    xlab("False Positive Rate (1-Specifity)") +
+    ylab("True Positive Rate (Sensitivity)") +
+    geom_abline(intercept = 0, slope = 1,  linetype = "dotted", col = "black") +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0, 0.01)) +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0.01, 0)) + 
+    theme_tufte() +
+    labs(x = "False Positive Rate (1-Specifity)",
+         y = "True Positive Rate (Sensitivity)",
+         title = plot_name)
+  
+  roc_plot
+}
+
+
+
+FinModelROC <- createRocPlot(roc_obj_holdout, "ROC curve for best model (RF)")
+
+
+# 3 e) How large are correlations of predicted scores on the validation set ----
     # produced by the base learners
 
 
-# 3 f) Create Stacked ensemble model from the base learners.
 
+# 3 f) Create Stacked ensemble model from the base learners. ----
+
+#install.packages("caretEnsemble")
+#library(caretEnsemble)
+
+
+
+glmEnsemble <- caretStack(
+  as.caretList(final_models_3c),
+  method = "glm",
+  metric = "ROC",
+  trControl = trainControl(
+    method = "cv",
+    number = 5,
+    savePredictions = "final",
+    classProbs = T,
+    summaryFunction = twoClassSummary
+  )
+)
+
+
+RF_Ensemble <- caretStack(
+  as.caretList(final_models_3c),
+  method = "ranger",
+  metric = "ROC",
+  tuneGrid = expand.grid(
+    .mtry = 2:6,
+    .splitrule = "gini",
+    .min.node.size = seq(5,45,by = 5)), 
+  trControl = trainControl(
+    method = "cv",
+    number = 5,
+    savePredictions = "final",
+    classProbs = T,
+    summaryFunction = twoClassSummary
+  )
+)
+RF_Ensemble$ens_model
+
+final_models_3c[['Lin_Ensemble']] <- NULL
+
+glmEnsemble %>% summary()
+RF_Ensemble %>% summary()
+RF_Ensemble$ens_model$pred
+glmEnsemble %>% class()
+
+resamples(final_models_3c)
+
+evalm(glmEnsemble)
 
 # 3 g) Evaluate ensembles on validation set - Did prediction improve ?
 
