@@ -1,0 +1,625 @@
+---
+title: "CEU Data Science 2: Ensemble Trees, Variable Importance, & Model Stacking"
+author: "Bruno Helmeczy"
+date: "21/03/2021"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+  pdf_document: default
+---
+
+This report summarizes my homework made for the Data Science 2: Machine Learning Tools class at the Central European University's MSc Business Analytics program. The 1st Chapter looks to predict a binary customer choice between orange juices, using a CART, a Random Forest, & a stochastic & extreme Gradient boosting algorithms.
+
+The 2nd Chapter investigates Variable importance plots between 2 Random Forests & 2 Gradient Boosting Machines, in the 1st case comparing variables' importance with respect to the number of variables sampled at each node (2 vs 10), in the latter with respect to the sampling rate (10% vs 100%).  
+
+The 3rd chapter looks to predict whether patients are going to show up to their medical appointments. After setting a penalized linear model as benchmark, I fit 1-1 Random Forest, Stochastic Gradient Boosting, eXtreme Gradient Boosting, K-Nearest Neighbor & Support Vector Machine model. Finally, I use these models & the caretEnsemble package to fit a linear & tree-based stacked ensemble model, looking to improve predictive power.
+
+```{r setup, message = F, warning = F, echo = T}
+library(tidyverse)
+library(data.table)
+library(caret)
+library(gbm)
+library(rpart.plot)
+library(MLeval)
+library(pROC)
+library(caTools)
+library(ggplot2)
+library(viridis)
+library(ggthemes)
+library(dplyr)
+library(kableExtra)
+library(gridExtra)
+
+options(scipen=999)
+theme_set(theme_tufte())
+
+
+```
+
+
+### 1) TREE ENSEMBLE MODELS
+
+As said, the 1st chapter looks to predict Manhattan properties' total valuations, specifically logTotalValue, based on an array of features, including various zoning districts, health or police area codes, and size of special-purpose areas within a building, e.g. Commercial / Garage area. 
+
+As part of cleaning my data, my 1st helper function helps me keep an overview, by returning column names, classes & number of distinct values - possible to call anytime, thus useful as a status checkup, or returning the current column names to loop through in later functions. I also delete Zoning Districts 2-4 due to 60%+ missing values in each, transform Yes / No & Logical variables to 1s & 0s, and specify Council district, Health Area Code & Police Prct as categorical variables, i.e. factors. I do so based on the data description available on github [(here)](https://github.com/NYCPlanning/db-pluto/blob/master/metadata/Data_Dictionary.md?fbclid=IwAR0lNCMLS6ySPi-eXCoVyNbePj9klTA9KYM91HJ36B3YeQt1l4-9EbIqG3s).
+
+
+```{r helpers, message = F, warning = F, echo = T}
+
+
+```
+
+
+#### 1 a) Create a training data of 75% and keep 25% of the data as a test set.
+
+
+
+```{r a , message = F, warning = F, echo = T, fig.align= 'center', fig.height=3,fig.width=6}
+# 1) TREE ENSEMBLE MODELS - 7points ----
+df <- as_tibble(ISLR::OJ)
+# Target var = Purchase
+
+# 1 a) Create a training data of 75% and keep 25% of the data as a test set. 
+#### Sample vs Holdout sets ####
+set.seed(1)
+train_indices <- as.integer(createDataPartition(df$Purchase, p = 0.75, list = FALSE))
+data_train <- df[train_indices, ]
+data_holdout <- df[-train_indices, ]
+
+# train control is 5 fold cross validation
+train_control <- trainControl(method = "cv",
+                              number = 5,
+                              verboseIter = FALSE,
+                              summaryFunction = twoClassSummary, 
+                              classProbs = T,
+                              savePredictions = "final") 
+
+```
+
+
+```{r a2 , message = F, warning = F, echo = T, eval = F}
+
+#### CART ####
+set.seed(1234)
+cart_model <- train(
+  Purchase ~ .,
+  data = data_train,
+  method = "rpart",
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= expand.grid(cp = 0.0005))
+```
+
+```{r a3,  message = F, warning = F, echo = T}
+# Tree Plot
+rpart.plot(cart_model$finalModel)
+
+```
+
+#### 1.b) Investigate Tree Ensemble Models: RF, GBM, XGBoost 
+  - Try different tuning parameters
+  - Select best-model w cross-validation
+
+```{r b2,  message = F, warning = F, echo = T}
+
+#### RAND FOREST ####
+rf_tune_grid <- expand.grid(
+  .mtry = 2:10,
+  .splitrule = "gini",
+  .min.node.size = seq(5,45,by = 5) 
+)
+
+set.seed(1234)
+rf_model_1b <- train(
+  Purchase ~ .,
+  data = data_train,
+  method = "ranger",
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= rf_tune_grid,
+  importance = "impurity"
+  )
+
+#### GBM ####
+gbm_grid <-  expand.grid(
+  interaction.depth = c(1:5)*2-1, # complexity of the tree
+  n.trees = 500, # number of iterations, i.e. trees
+  shrinkage = c(1,5,10)*0.0001, # learning rate: how quickly the algorithm adapts
+  n.minobsinnode = seq(5,25,by = 5) # the minimum number of training set samples in a node to commence splitting
+)
+
+set.seed(1234)
+gbm_model_1b <- train(
+  Purchase ~ .,
+  data = data_train,
+  method = "gbm",
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= gbm_grid)
+
+ #### XGBoost ####
+ xgb_grid <-  expand.grid(
+   nrounds=c(500,750),
+   max_depth = (2:4)*2+1,
+   eta = c(0.03,0.05, 0.06),
+   gamma = c(0.01),
+   colsample_bytree = seq(75,95,by =10 )/100,  
+   min_child_weight = (1:5)/10,
+   subsample = c(0.75)
+ )
+ 
+set.seed(1234)
+ xgb_model_1b <- train(
+   Purchase ~ .,
+   data = data_train,
+   method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+   metric = "ROC",
+   trControl = train_control,
+   tuneGrid= xgb_grid
+   )
+ 
+
+ 
+```
+
+
+
+#### 1 c) Compare models' performance - CARET -> resamples() ----
+# set.seed() same 4 all 3 models
+# Either model has significantly different predictive power?
+
+
+
+```{r c , message = F, warning = F, echo = T}
+
+
+ final_models <-
+  list("CART" = cart_model,
+       "Random_Forest" = rf_model_1b,
+       "GBM" = gbm_model_1b,
+       "XGBoost" = xgb_model_1b)
+
+results <- resamples(final_models) %>% summary()
+
+CV_SummTable <- sapply(c('ROC','Sens','Spec'), function(x) {
+  tl <- list()
+  tl <- results$statistics[[x]][,c("Mean")] %>% round(4)
+  return(tl)
+}) %>% as.data.frame()
+colnames(CV_SummTable) <- c("AUC","Sensitivity","Specificity") 
+
+CV_SummTable %>% kable()
+
+```
+
+
+
+
+#### 1 d) Choose best model & Plot ROC curve for best model based on test set. ----
+      # Calculate & Interpret AUC
+
+
+
+
+```{r d , message = F, warning = F, echo = T}
+
+GetCV_AUCs <- function(named_model_list,control_value) {
+  CV_AUC_folds <- list()
+  
+  for (model_name in names(named_model_list)) {
+    auc <- list()
+    model <- named_model_list[[model_name]]
+    fold <- "Fold1"
+
+    for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+      cv_fold <- model$pred %>% filter(Resample == fold)
+      TuneParams <- model$bestTune %>% colnames()
+      
+      for (param in TuneParams) {
+        cv_fold <- cv_fold[cv_fold[,param] == model$bestTune[,param],]
+      }
+      roc_obj <- roc(cv_fold$obs, cv_fold[,c(control_value)])
+      auc[[fold]] <- as.numeric(roc_obj$auc)
+    }
+    CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
+                                             "AUC" = unlist(auc))
+  }
+  CV_AUC <- list()
+
+  for (model_name in names(named_model_list)) {
+    CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
+  }
+  AUCs <- CV_AUC %>% cbind() 
+  colnames(AUCs) <- "Model_AUC"
+  return(AUCs)
+}
+
+AUC_1b <- GetCV_AUCs(final_models,"CH")
+AUC_1b %>% kable()
+
+rf_pred <- predict(rf_model_1b, data_holdout, type="prob")
+data_holdout[,"best_model_pred"] <- rf_pred[,"CH"]
+
+roc_obj_holdout <- roc(data_holdout$Purchase, data_holdout$best_model_pred)
+
+createRocPlot <- function(r, plot_name) {
+  all_coords <- coords(r, x="all", ret="all", transpose = FALSE)
+  
+  roc_plot <- ggplot(data = all_coords, aes(x = fpr, y = tpr)) +
+    geom_line(color='blue', size = 0.7) +
+    geom_area(aes(fill = 'red', alpha=0.4), alpha = 0.3, position = 'identity', color = 'blue') +
+    scale_fill_viridis(discrete = TRUE, begin=0.6, alpha=0.5, guide = FALSE) +
+    xlab("False Positive Rate (1-Specifity)") +
+    ylab("True Positive Rate (Sensitivity)") +
+    geom_abline(intercept = 0, slope = 1,  linetype = "dotted", col = "black") +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0, 0.01)) +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0.01, 0)) + 
+    theme_tufte() +
+    labs(x = "False Positive Rate (1-Specifity)",
+         y = "True Positive Rate (Sensitivity)",
+         title = paste0(plot_name,": ",round(r$auc,3)))
+  
+  roc_plot
+}
+
+FinModelROC <- createRocPlot(roc_obj_holdout, "ROC curve for best model (RF)")
+FinModelROC
+```
+
+#### e) Inspect variable importance plots for the 3 models ----
+    # Similar variables found most important by all 3 ? 
+
+
+```{r e , message = F, warning = F, echo = T}
+
+VarImpPlots <- function(named_model_list) {
+  lapply(names(named_model_list), function(x) {
+    VarImp_Plots <- list()
+    df <- varImp(named_model_list[[x]])$importance
+    df$names <- df %>% rownames()
+    
+    VarImp_Plots[[x]] <- df %>% 
+      ggplot(aes(reorder(names,Overall), Overall) ) +
+      geom_point(color = "blue") +
+      geom_segment(aes(x=names,xend=names,y=0,yend=Overall), color = "blue") +
+      theme_tufte() + 
+      coord_flip() +
+      labs(x = "Predictor Variables", y = "Relative Importance",
+           title = paste0(x, " Model - Var. Importance Plot"))
+    
+    return(VarImp_Plots)
+  })
+  
+}
+VarPlot1e <- VarImpPlots(final_models)
+
+grid.arrange(VarPlot1e[[2]],VarPlot1e[[3]], VarPlot1e[[4]], ncol = 3)
+
+```
+
+
+
+
+### 2. VARIABLE IMPORTANCE PROFILES.
+
+
+#### 2. a) VARIABLE IMPORTANCE PROFILES.
+
+```{r f , message = F, warning = F, echo = T}
+
+df <- as_tibble(ISLR::Hitters) %>% drop_na(Salary) %>% 
+  mutate(log_salary = log(Salary), Salary = NULL)
+
+# 2 a) Train 2 RFs - 1 sampling 2 vars randomly / split -> 1 sampling 10 ----
+      # Use whole data & no cross-validation
+      # Inspect variable importance profiles
+    # What do you see - 
+      # how important the first few variables are relative to each other?
+train_control <- trainControl(method = "none", savePredictions = T)
+
+rf_model_2a_2 <- train(
+  log_salary ~ .,
+  data = df, 
+  method = "rf",
+  trControl = train_control,
+  tuneGrid = expand.grid(
+    .mtry = 2)
+  )
+
+rf_model_2a_10 <- train(
+  log_salary ~ .,
+  data = df, 
+  method = "rf",
+  trControl = train_control,
+  tuneGrid = expand.grid(
+    .mtry = 10) 
+)
+
+RFs_2a <- list("Rand_Forest_2Vars" = rf_model_2a_2,
+               "Rand_Forest_10Vars" = rf_model_2a_10)
+
+VarPlots_2a <- VarImpPlots(RFs_2a)
+grid.arrange(VarPlots_2a[[1]],VarPlots_2a[[2]], ncol = 2)
+
+```
+
+
+####  2. b) Either model is more extreme fr 2a) -> Give Intuition how mtry relates
+ - Small mtry -> Variable selection random 
+ - Larger mtry -> selection from larger pool of randomly chosen vars, based on variance minimization
+    - weaker predictors have bigger chance of being overpowered by stronger ones, i.e. strong predictors have smaller chance of not being used for prediction.
+
+####  2. c) Either model is more extreme fr 2a) -> Give Intuition how mtry relates
+
+```{r g , message = F, warning = F, echo = T, eval = F}
+# 2 c) Same as 2a), estimate 2 GBMs - vary sampling of trees ----
+        # 0.1 & 1 for bag.fraction / sample_rate parameter
+          # Hold all other params fixed
+            # grow 500 trees -> max depth = 5 -> learning rate = 0.1
+      # Compare variable importance plots for 2 models
+        # Intuition on why 1 var importance profile more extreme then the other?
+
+h2o.init()
+
+gbm_h2o_2c_0.1 <- train(
+  log_salary ~ .,
+  data = df,
+  method = "gbm_h2o",
+  trControl = train_control,
+  tuneGrid= expand.grid(
+    ntrees = 500,
+    max_depth = 5,
+    min_rows = 5,
+    learn_rate = 0.1,
+    col_sample_rate = 0.1)
+  )
+
+gbm_h2o_2c_1 <- train(
+  log_salary ~ .,
+  data = df,
+  method = "gbm_h2o",
+  trControl = train_control,
+  tuneGrid= expand.grid(
+    ntrees = 500,
+    max_depth = 5,
+    min_rows = 5,
+    learn_rate = 0.1,
+    col_sample_rate = 1)
+)
+h2o.shutdown()
+Y
+
+```
+
+## Add readRDS-s
+
+```{r g , message = F, warning = F, echo = T}
+
+GBMs_2c <- list("GBM_10%_Sampling" = gbm_h2o_2c_0.1,
+               "GBM_100%_Sampling" = gbm_h2o_2c_1)
+
+VarPlots_2c <- VarImpPlots(GBMs_2c)
+grid.arrange(VarPlots_2c[[1]],VarPlots_2c[[2]], ncol = 2)
+
+```
+
+
+
+### 3. STACKING 
+
+```{r h , message = F, warning = F, echo = T}
+# 3) STACKING - 10 points ----data <- read_csv("KaggleV2-May-2016.csv") ----
+myurl <- "https://raw.githubusercontent.com/BrunoHelmeczy/Machine_Learning_Courses_DS1-3/main/DS2/KaggleV2-May-2016.csv"
+data <- read_csv(myurl)
+
+# some data cleaning
+data <- select(data, 
+               -one_of(c("PatientId", "AppointmentID", "Neighbourhood"))) %>%
+  janitor::clean_names()
+
+# for binary prediction, the target variable must be a factor + generate new variables
+data <- mutate(
+  data,
+  no_show = factor(no_show, levels = c("Yes", "No")),
+  handcap = ifelse(handcap > 0, 1, 0),
+  across(c(gender, scholarship, hipertension, alcoholism, handcap), factor),
+  hours_since_scheduled = as.numeric(appointment_day - scheduled_day))
+
+# clean up a little bit
+data <- filter(data, between(age, 0, 95), hours_since_scheduled >= 0) %>%
+  select(-one_of(c("scheduled_day", "appointment_day", "sms_received")))
+
+```
+
+#### 3. a) Train / Validation / Test Sets - 5% / 45 / 50 
+
+```{r h2 , message = F, warning = F, echo = T}
+
+# 3 a) Train / Validation / Test Sets - 5% / 45 / 50 -----
+
+# CreateDataPartition
+set.seed(1)
+test_indices <- as.integer(createDataPartition(data$no_show, p = 0.5, list = FALSE))
+data_test <- data[test_indices, ]
+data_model <- data[-test_indices, ]
+
+set.seed(1)
+train_indices <- as.integer(createDataPartition(data_model$no_show, p = 0.1,list = FALSE))
+data_train <- data_model[train_indices,]
+data_validate <- data_model[-train_indices,]
+data_model <- NULL
+
+# 5 fold cross validation - using index in trainControl for caretStack() 
+MyFolds <- createFolds(data_train$no_show,k = 5) 
+
+train_control <- trainControl(index = MyFolds,
+                              verboseIter = FALSE,
+                              summaryFunction = twoClassSummary, 
+                              classProbs = T,
+                              savePredictions = "final") 
+
+Formula <- paste0("no_show ~ ", data %>% 
+                    select(-no_show) %>% colnames() %>% paste(collapse = " + "))
+
+```
+
+#### 3. b) Train benchmark model of choice - RF / GBM / Glm 
+  # Evaluate on validation set - lets do GLM - Elastic Net
+
+```{r e2, message = F, warning = F, echo = T, eval = F, fig.align='center'}
+# 3 b) Train benchmark model of choice - rf / gbm / glm ----
+  # Evaluate on validation set - lets do GLM - Elastic Net
+
+# My E-Net Grid & Model ----
+ENet_tunegrid <- expand.grid(
+  "alpha"  = seq(0, 1, by = 0.1),
+  "lambda" = 10^seq(2,-5,length=100))
+
+Benchmark_GLM <- train(
+  formula(Formula),
+  data = data_train,
+  method = "glmnet",
+  family = "binomial",
+  preProcess = c("center","scale"),
+  trControl = train_control,
+  tuneGrid = ENet_tunegrid,
+  na.action=na.exclude
+)
+
+```
+
+```{r 2a , message = F, warning = F, echo = T}
+
+
+```
+
+
+#### 3. c) Build min 3 models of different model families - w cross-validation ----
+    # keep cross-validated predictions
+
+```{r 2a , message = F, warning = F, echo = T}
+
+
+```
+
+#### 2. b) Determine optimal number of clusters as indicated by NbClust heuristics 
+
+To determine optimal number of clusters for K-means clustering, I use the NbClust() function, trying any number of clusters from 2 to 10. 
+
+```{r 2b , message = F, warning = F, echo = T,results="hide", fig.align='center', fig.height=3}
+
+nb <- NbClust(data_scaled, method = "kmeans", min.nc = 2, max.nc = 10, index = "all")
+
+Cluster <- nb$Best.nc["Number_clusters",] %>% cbind() %>% as.data.frame()
+colnames(Cluster) <- "Optimal_Cluster_Nr"
+
+NrClustsRec <- Cluster %>% 
+    ggplot(aes(x = Optimal_Cluster_Nr)) + 
+    geom_bar(color = "red", fill = "navy") +
+    scale_x_continuous(labels = c(0:10), breaks = c(0:10)) +
+    scale_y_continuous(labels = c(1:11), breaks = c(1:11)) + 
+    labs(title = "Frequency of Recommended Nr. Of Clusters",
+         y = "Nr. Times Reccommended",
+         x = "Nr. of Clusters Recommended")
+
+NrClustsRec 
+
+```
+
+The plot above depicts the distribution of voted cluster numbers. 2 is overwhelmingly in favor & is therefore my choice.
+
+#### 2 c) Use K-means to Cluster states using Nr. Clusters found in b)
+
+Below I use the most voted number of clusters (obtained fomr above) to cluster observations, with 30 starting points. I add the resulting cluster designations to my original data frame, & color the clusters while depicting Urban Population vs Murder, Assault & Rape. The plots below show that largely, K-means seems to assign clusters based on these 3 variables. 
+
+```{r 2c , message = F, warning = F, echo = T, fig.height=3}
+
+km <- kmeans(data_scaled, centers = nb$Best.partition %>% unique() %>% length(),
+             nstart = 30)
+
+data_w_clusters <- mutate(data, cluster = factor(km$cluster))
+
+# Murder
+Murder <- data_w_clusters %>% 
+  ggplot(aes(x = UrbanPop, y = Murder,  color = cluster)) +
+  geom_point( )
+
+# Assault
+Assault <- ggplot(data_w_clusters, aes(x = UrbanPop, y = Assault, color = cluster)) +geom_point()
+
+# Rape
+Rape <- ggplot(data_w_clusters, aes(x = UrbanPop, y = Rape, color = cluster)) +  geom_point()
+
+grid.arrange(Murder, Assault, Rape, ncol = 3)
+
+```
+
+#### 2 d) Do PCA & Get 1st 2 PC coordinates 4 all observations: 
+
+In this final section, the 1st 2 Principal Components are obtain from the raw data, & data points are visualized from perspective of the 2 principal components, after assigned clusters are added to the dataframe. The plot below shows a clear line of de-markation at ca. PC1 = -0.1. The question remaining is what these principal components do most significantly take into account, as well as what seperates these identified clusters.
+
+```{r 2d , message = F, warning = F, echo = T }
+pca_result <- prcomp(data,scale = T)
+
+Cities <- rownames(pca_result$x)
+
+first_two_pc <- pca_result$x[,1:2] %>% as.data.frame()
+first_two_pc <- first_two_pc %>% 
+  mutate(cluster = factor(km$cluster),City = Cities)
+rownames(first_two_pc) <- Cities
+
+    #   Plot clusters of choice along co-ordinate system of 1st 2 PCs
+
+PC12Plot <- first_two_pc %>% ggplot(aes(x = PC1,y = PC2, color = cluster)) +
+  geom_point() +geom_text(label = Cities, size = 3, hjust = -0.1)
+
+  # Very clear Seperation along PC1 
+
+#   How do clusters relate to these?
+ClusterTable <- data_w_clusters %>% group_by(cluster) %>%
+  summarize(StateCount = n(),
+            AvgMurder = mean(Murder)     ,AvgAssault = mean(Assault),
+            AvgUrbanPop = mean(UrbanPop) ,AvgRape = mean(Rape))
+  # Cluster 2 ca. 3x Murder / 2x Assault / 2x Rape
+    # Safe vs Unsafe seems an intuitive cluster title 
+      # Weights used to project observations along PCs helps this further:
+
+PC12_Weights <- pca_result$rotation[,1:2] %>% round(4)
+
+PC1_Cont <- fviz_contrib(pca_result, "var", axes = 1) # Crime-related
+PC2_Cont <- fviz_contrib(pca_result, "var", axes = 2) # Population-related
+
+PC12Plot
+
+
+ClusterTable %>% kable()
+
+PC12_Weights %>% kable()
+
+grid.arrange(PC1_Cont,PC2_Cont, ncol = 2)
+
+
+```
+
+A 1st table above calculates variable mean by cluster. 1 can see that cluster 1 vs cluster 2, the average number of murders is 2.5x, average number of assaults & rapes are 2x. Thus, 1 way to interpret the clusters may be Safe vs Unsafe. The 2nd table shows the explicit weights used per variable to derive observation coordinates from perspective of the first 2 Principal Components, while the bar charts that follow depict variable significance/contribution for a PC. Indeed, 1 can see that the 1st Principal Component primarily takes into account crime-related variables, while the 2nd PC overwhelmingly focuses on Urban Population.
+
+
+# Appendices
+
+### Raw Histograms, Box- & Scatterplots
+
+```{r App 1 , message = F, warning = F, echo = T, results = "hide", fig.height=2.5, fig.width= 5}
+
+Hists() 
+
+```
+
+
+### Transformed Box- & Scatterplots
+
+```{r App 2 , message = F, warning = F, echo = T, results = "hide", fig.height=2.5, fig.width= 5}
+
+Boxes_n_Scatters()
+
+```

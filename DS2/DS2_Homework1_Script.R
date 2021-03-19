@@ -1,4 +1,4 @@
-rm(list=ls())
+# rm(list=ls())
 
 library(tidyverse)
 library(data.table)
@@ -12,10 +12,9 @@ library(ggplot2)
 library(viridis)
 library(ggthemes)
 library(dplyr)
+library(h2o)
 
-
-
-
+setwd("C:/Users/helme/Desktop/CEU/WINTER_Term/Data_Science/Machine_Learning_Courses_DS1-3/DS2")
 
 # 1) TREE ENSEMBLE MODELS - 7points ----
 df <- as_tibble(ISLR::OJ)
@@ -25,7 +24,7 @@ df <- as_tibble(ISLR::OJ)
 # 1 a) Create a training data of 75% and keep 25% of the data as a test set. 
 #### Sample vs Holdout sets ####
 set.seed(1)
-train_indices <- as.integer(createDataPartition(df$Purchase, p = 0.7, list = FALSE))
+train_indices <- as.integer(createDataPartition(df$Purchase, p = 0.75, list = FALSE))
 data_train <- df[train_indices, ]
 data_holdout <- df[-train_indices, ]
 
@@ -35,7 +34,7 @@ train_control <- trainControl(method = "cv",
                               verboseIter = FALSE,
                               summaryFunction = twoClassSummary, 
                               classProbs = T,
-                              savePredictions = T) 
+                              savePredictions = "final") 
 
 # Train a decision tree as a benchmark model. 
         # Plot the final model and interpret the result 
@@ -52,13 +51,17 @@ cart_model <- train(
   trControl = train_control,
   tuneGrid= expand.grid(cp = 0.0005))
 
+saveRDS(cart_model,"cart_model.rds")
+getwd()
 # Tree Plot
+readRDS("cart_model.rds")
+
 rpart.plot(cart_model$finalModel)
 
 
 
 # Evaluation
-x <- evalm(cart_model)
+x <- MLeval::evalm(cart_model)
 # ROC Curve + AUC Values
 x$roc
 # Confusion Matrix
@@ -72,14 +75,13 @@ mean(cart_model$pred[,c("obs")] == cart_model$pred[,c("pred")])
       # RF, GBM, XGBoost -> Try different tuning parameters
       # Select best-model w cross-validation
 
+#### RAND FOREST ####
 rf_tune_grid <- expand.grid(
   .mtry = 2:10,
   .splitrule = "gini",
   .min.node.size = seq(5,45,by = 5) 
 )
 
-
-#### RAND FOREST ####
 set.seed(1234)
 rf_model_1b <- train(
   Purchase ~ .,
@@ -91,7 +93,10 @@ rf_model_1b <- train(
   importance = "impurity"
   )
 
-rf_model_1b$bestTune
+x <- evalm(rf_model_1b)
+x$roc
+
+saveRDS(rf_model_1b,"rf_model_1b.rds")
 
 #### GBM ####
 gbm_grid <-  expand.grid(
@@ -113,6 +118,8 @@ gbm_model_1b <- train(
 x <- evalm(gbm_model_1b)
 x$roc
 
+saveRDS(gbm_model_1b,"gbm_model_1b.rds")
+
  #### XGBoost ####
  xgb_grid <-  expand.grid(
    nrounds=c(500,750),
@@ -125,41 +132,23 @@ x$roc
  )
  
 set.seed(1234)
- xgb_model_1b <- train(
+xgb_model_1b <- train(
    Purchase ~ .,
    data = data_train,
    method = "xgbTree", # xgbDART / xgbLinear / xgbTree
    metric = "ROC",
    trControl = train_control,
    tuneGrid= xgb_grid
-   )
+)
  
-#----------- 
+x <- evalm(gbm_model_1b)
+x$roc
 
-models <- list(cart_model,rf_model_1b,gbm_model_1b,xgb_model_1b)
-
-
-plots <- list()
-findf <- x$stdres$`Group 1`[,1] %>% cbind() %>% as.data.frame()
-for (model in 1:length(models)) {
-  x <- evalm(models[[model]])
-  plots[[model]] <- x$roc
-  df <- x$stdres$`Group 1`[,1] %>% cbind() %>% as.data.frame()
-  names <-  x$stdres$`Group 1` %>% rownames()
-  rownames(df) <- names
-  findf <- cbind(findf,df)
-
-}
-findf <- findf[,2:5]
-colnames(findf) <- c("CART","RandForest","GBM","XGBoost")
-findf
-plots
-
-
+saveRDS(xgb_model_1b,"xgb_model_1b.rds")
 
 # 1 c) Compare models' performance - CARET -> resamples() ----
-      # set.seed() same 4 all 3 models
-      # Either model has significantly different predictive power?
+# set.seed() same 4 all 3 models
+# Either model has significantly different predictive power?
 
 final_models <-
   list("CART" = cart_model,
@@ -169,43 +158,64 @@ final_models <-
 
 results <- resamples(final_models) %>% summary()
 
+CV_SummTable <- sapply(c('ROC','Sens','Spec'), function(x) {
+  tl <- list()
+  tl <- results$statistics[[x]][,c("Mean")] %>% round(4)
+  return(tl)
+}) %>% as.data.frame()
+colnames(CV_SummTable) <- c("AUC","Sensitivity","Specificity") 
+CV_SummTable
+
 # 1 d) Choose best model & Plot ROC curve for best model based on test set. ----
       # Calculate & Interpret AUC
 
-CV_AUC_folds <- list()
-for (model_name in names(final_models)) {
+GetCV_AUCs <- function(named_model_list,control_value) {
+  CV_AUC_folds <- list()
   
-  auc <- list()
-  model <- final_models[[model_name]]
-  fold <- "Fold1"
-  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
-    cv_fold <- model$pred %>% filter(Resample == fold)
+  model_name <- names(named_model_list)[7]
+  for (model_name in names(named_model_list)) {
     
-    roc_obj <- roc(cv_fold$obs, cv_fold$CH)
-    auc[[fold]] <- as.numeric(roc_obj$auc)
+    auc <- list()
+    model <- named_model_list[[model_name]]
+    
+    fold <- "Fold1"
+    for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+      cv_fold <- model$pred %>% filter(Resample == fold)
+      TuneParams <- model$bestTune %>% colnames()
+      
+      for (param in TuneParams) {
+        cv_fold <- cv_fold[cv_fold[,param] == model$bestTune[,param],]
+      }
+      
+      roc_obj <- roc(cv_fold$obs, cv_fold[,c(control_value)])
+      auc[[fold]] <- as.numeric(roc_obj$auc)
+    }
+    
+    CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
+                                             "AUC" = unlist(auc))
   }
   
-  CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
-                                           "AUC" = unlist(auc))
+  CV_AUC <- list()
+  for (model_name in names(named_model_list)) {
+    CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
+  }
+  
+  AUCs <- CV_AUC %>% cbind() %>% as.data.frame()
+  colnames(AUCs) <- "Model_AUC"
+  
+  return(AUCs)
 }
 
-CV_AUC <- list()
-for (model_name in names(final_models)) {
-  CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
-}
+AUC_1b <- GetCV_AUCs(final_models,"CH")
+AUC_1b
 
-AUCs <- CV_AUC %>% rbind() 
-
-## ROC Plot with built-in package 
 
 rf_pred <- predict(rf_model_1b, data_holdout, type="prob")
-colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
-
-## ROC plot with own function
-colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
 data_holdout[,"best_model_pred"] <- rf_pred[,"CH"]
 
 roc_obj_holdout <- roc(data_holdout$Purchase, data_holdout$best_model_pred)
+r <- roc_obj_holdout
+r$auc
 
 createRocPlot <- function(r, plot_name) {
   all_coords <- coords(r, x="all", ret="all", transpose = FALSE)
@@ -222,15 +232,13 @@ createRocPlot <- function(r, plot_name) {
     theme_tufte() +
     labs(x = "False Positive Rate (1-Specifity)",
          y = "True Positive Rate (Sensitivity)",
-         title = plot_name)
+         title = paste0(plot_name,": ",round(r$auc,3)))
   
   roc_plot
 }
 
-
-
 FinModelROC <- createRocPlot(roc_obj_holdout, "ROC curve for best model (RF)")
-
+FinModelROC
 
 # 1 e) Inspect variable importance plots for the 3 models ----
     # Similar variables found most important by all 3 models ? 
@@ -279,6 +287,8 @@ rf_model_2a_2 <- train(
     .mtry = 2)
   )
 
+saveRDS(rf_model_2a_2,"rf_model_2a_2.rds")
+
 rf_model_2a_10 <- train(
   log_salary ~ .,
   data = df, 
@@ -288,12 +298,14 @@ rf_model_2a_10 <- train(
     .mtry = 10) 
 )
 
+saveRDS(rf_model_2a_10,"rf_model_2a_10.rds")
+
 RFs_2a <- list("Rand_Forest_2Vars" = rf_model_2a_2,
                "Rand_Forest_10Vars" = rf_model_2a_10)
 
 VarImpPlots(RFs_2a)
 
-# 2 b) Either model is more extreme fr 2a) -> Give Intuition how mtry relates
+# 2 b) Either model is more extreme fr 2a) -> Give Intuition how mtry relates ----
 
 
 # 2 c) Same as 2a), estimate 2 GBMs - vary sampling of trees ----
@@ -305,7 +317,6 @@ VarImpPlots(RFs_2a)
 
 h2o.init()
 
-set.seed(1234)
 gbm_h2o_2c_0.1 <- train(
   log_salary ~ .,
   data = df,
@@ -319,7 +330,8 @@ gbm_h2o_2c_0.1 <- train(
     col_sample_rate = 0.1)
   )
 
-set.seed(1234)
+saveRDS(gbm_h2o_2c_0.1,"gbm_h2o_2c_0.1.rds")
+
 gbm_h2o_2c_1 <- train(
   log_salary ~ .,
   data = df,
@@ -333,6 +345,8 @@ gbm_h2o_2c_1 <- train(
     col_sample_rate = 1)
 )
 
+saveRDS(gbm_h2o_2c_1,"gbm_h2o_2c_1.rds")
+
 GBMs_2c <- list("GBM_10%_Sampling" = gbm_h2o_2c_0.1,
                "GBM_100%_Sampling" = gbm_h2o_2c_1)
 
@@ -344,7 +358,8 @@ myurl <- "https://raw.githubusercontent.com/BrunoHelmeczy/Machine_Learning_Cours
 data <- read_csv(myurl)
 
 # some data cleaning
-data <- select(data, -one_of(c("PatientId", "AppointmentID", "Neighbourhood"))) %>%
+data <- select(data, 
+               -one_of(c("PatientId", "AppointmentID", "Neighbourhood"))) %>%
   janitor::clean_names()
 
 # for binary prediction, the target variable must be a factor + generate new variables
@@ -360,19 +375,14 @@ data <- mutate(
 data <- filter(data, between(age, 0, 95), hours_since_scheduled >= 0) %>%
   select(-one_of(c("scheduled_day", "appointment_day", "sms_received")))
 
-# data <- data %>% mutate(gender = factor(gender, levels = c("F","M"), labels = c(1,2)))
-# data <- data[,c("no_show")] %>% cbind(sapply(data %>% select(-no_show), as.numeric)) %>% as.data.frame()
-# data <- sapply(data, as.numeric) %>% as.data.frame()
 
 # 3 a) Train / Validation / Test Sets - 5% / 45 / 50 -----
 
 # CreateDataPartition
-#### Sample vs Holdout sets ####
 set.seed(1)
 test_indices <- as.integer(createDataPartition(data$no_show, p = 0.5, list = FALSE))
 data_test <- data[test_indices, ]
 data_model <- data[-test_indices, ]
-
 
 set.seed(1)
 train_indices <- as.integer(createDataPartition(data_model$no_show, p = 0.1,list = FALSE))
@@ -380,11 +390,13 @@ data_train <- data_model[train_indices,]
 data_validate <- data_model[-train_indices,]
 data_model <- NULL
 
-# train control is 5 fold cross validation ----
+# 5 fold cross validation - using index in trainControl for caretStack() 
 MyFolds <- createFolds(data_train$no_show,k = 5) 
 
-train_control <- trainControl(index = MyFolds,
-                              verboseIter = FALSE,
+train_control <- trainControl(method = "cv",
+                              number = 5,
+                              index = MyFolds,
+                              verboseIter = T,
                               summaryFunction = twoClassSummary, 
                               classProbs = T,
                               savePredictions = "final") 
@@ -399,7 +411,8 @@ ENet_tunegrid <- expand.grid(
  "lambda" = 10^seq(2,-5,length=100)
 )
 
-Formula <- paste0("no_show ~ ", data %>% select(-no_show) %>% colnames() %>% paste(collapse = " + "))
+Formula <- paste0("no_show ~ ", data %>% 
+                    select(-no_show) %>% colnames() %>% paste(collapse = " + "))
  
 Benchmark_GLM <- train(
   formula(Formula),
@@ -412,17 +425,26 @@ Benchmark_GLM <- train(
   na.action=na.exclude
 )
 
-x <- evalm(Benchmark_GLM)
+saveRDS(Benchmark_GLM,"Benchmark_GLM.rds")
 
-Preds <- Benchmark_GLM$pred[,"pred"][Benchmark_GLM$pred$alpha == Benchmark_GLM$bestTune[,"alpha"] & Benchmark_GLM$pred$lambda == Benchmark_GLM$bestTune[,"lambda"]]
-Obss <- Benchmark_GLM$pred[,"obs"][Benchmark_GLM$pred$alpha == Benchmark_GLM$bestTune[,"alpha"] & Benchmark_GLM$pred$lambda == Benchmark_GLM$bestTune[,"lambda"]]
+# Function 2 get Ex-Sample Model perf -----------
+Get_ExSample_AUCs <- function(named_model_list, test_df) {
+  ExSample_AUCs <- list()
+  for (model in names(named_model_list)) {
+    Pred <- predict(named_model_list[[model]],newdata = test_df, type = "prob")
+    test_df[,model] <- as.data.frame(Pred)[,1]
+    test_df$pred <- as.data.frame(Pred)[,1]
+    ExSample_AUCs[[model]] <- roc(test_df$no_show,test_df$pred)$auc
+  }
+  
+  findf <- ExSample_AUCs %>% cbind() %>% as.data.frame()
+  colnames(findf) <- "Ex_Sample_AUC"
+  test_df$pred <- NULL
+  return(findf)
+}
 
-table(Preds,Obss)
+ExSamp_AUC_3b <- Get_ExSample_AUCs(list("Enet_Benchmark" = Benchmark_GLM), data_validate)
 
-Benchmark_GLM$pred[,"pred"][Benchmark_GLM$pred$lambda == Benchmark_GLM$bestTune[,"lambda"]]
-Benchmark_GLM$bestTune[,"lambda"]
-
-table(data_train$no_show)
 
 # 3 c) Build min 3 models of different model families - w cross-validation ----
     # keep cross-validated predictions
@@ -448,7 +470,7 @@ x <- RF_model_3c %>% evalm()
 x$roc
 x$stdres
 
-
+saveRDS(RF_model_3c,"RF_model_3c.rds")
 
 #### 2) GBM ####
 gbm_grid <-  expand.grid(
@@ -469,6 +491,8 @@ GBM_model_3c <- train(
 
 x <- evalm(GBM_model_3c)
 x$roc
+
+saveRDS(GBM_model_3c,"GBM_model_3c.rds")
 
 
 #### 3) XGBoost ####
@@ -492,6 +516,7 @@ XGB_model_3c <- train(
   tuneGrid= xgb_grid
 )
 
+saveRDS(XGB_model_3c,"XGB_model_3c.rds")
 
 x <- XGB_model_3c %>% evalm()
 x$roc
@@ -512,6 +537,8 @@ KNN_model_3c <- train(
   tuneGrid= data.frame(k = c((1:21)*2-1))
 )
 
+saveRDS(KNN_model_3c,"KNN_model_3c.rds")
+
 #### 5) Radial SVM ####
 set.seed(1234)
 SVM_Radial_3c <- train(
@@ -520,9 +547,19 @@ SVM_Radial_3c <- train(
   method = "svmRadial",
   metric = "ROC",
   trControl=train_control,
+  tuneGrid = expand.grid(
+    "sigma" = c(0:10)/10,
+    "C" = 2^c(2:11)
+  ),
   tuneLength = 10
 )
 
+  SVM_Radial_3c %>% plot()
+
+saveRDS(SVM_Radial_3c,"SVM_Radial_3c.rds")
+  
+evalm(SVM_Radial_3c)
+  
 # 3 d) Evaluate Validation set performance of each model ----
 final_models_3c <- list(
   "Benchmark_Enet" = Benchmark_GLM,
@@ -533,121 +570,71 @@ final_models_3c <- list(
   "SVM_Non_Lin"    = SVM_Radial_3c
 )
 
+AUCs_3d <- GetCV_AUCs(final_models_3c,"No")
 
-results <- resamples(final_models_3c) %>% summary()
+ExSample_AUCs <- Get_ExSample_AUCs(final_models_3c, data_validate)
 
-resamples(final_models_3c) %>% xyplot()
+cbind(AUCs_3d,ExSample_AUCs)
 
-# Old E.g. -----
-CV_AUC_folds <- list()
-
-model_name <- names(final_models_3c)[1]
-for (model_name in names(final_models_3c)) {
-  
-  auc <- list()
-  model <- final_models_3c[[model_name]]
-  fold <- "Fold1"
-  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
-    cv_fold <- model$pred %>% filter(Resample == fold)
-    TuneParams <- model$bestTune %>% colnames()
-
-    for (param in TuneParams) {
-      cv_fold <- cv_fold[cv_fold[,param] == model$bestTune[,param],]
-    }
-
-    roc_obj <- roc(cv_fold$obs, cv_fold$No)
-    auc[[fold]] <- as.numeric(roc_obj$auc)
-  }
-  
-  CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
-                                           "AUC" = unlist(auc))
-}
-
-CV_AUC <- list()
-for (model_name in names(final_models_3c)) {
-  CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
-}
-
-AUCs <- CV_AUC %>% cbind() 
-colnames(AUCs) <- "Model_AUC"
-
-#-----------
-model <- names(final_models_3c)[1]
-for (model in names(final_models_3c)) {
-  Pred <- predict(final_models_3c[[model]],newdata = data_validate, type = "prob")
-  data_validate[,paste0("Pred_",model)] <- Pred[,""]
-  
-  colAUC(Pred, data_validate$no_show, plotROC = TRUE)
-}
-
-rf_pred <- predict(rf_model_1b, data_holdout, type="prob")
-colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
-
-roc(data_validate[,paste0("Pred_",model)], data_validate$no_show)
-
-## ROC plot with own function
-colAUC(rf_pred, data_holdout$Purchase, plotROC = TRUE)
-data_holdout[,"best_model_pred"] <- rf_pred[,"CH"]
 
 roc_obj_holdout <- roc(data_holdout$Purchase, data_holdout$best_model_pred)
-
-createRocPlot <- function(r, plot_name) {
-  all_coords <- coords(r, x="all", ret="all", transpose = FALSE)
-  
-  roc_plot <- ggplot(data = all_coords, aes(x = fpr, y = tpr)) +
-    geom_line(color='blue', size = 0.7) +
-    geom_area(aes(fill = 'red', alpha=0.4), alpha = 0.3, position = 'identity', color = 'blue') +
-    scale_fill_viridis(discrete = TRUE, begin=0.6, alpha=0.5, guide = FALSE) +
-    xlab("False Positive Rate (1-Specifity)") +
-    ylab("True Positive Rate (Sensitivity)") +
-    geom_abline(intercept = 0, slope = 1,  linetype = "dotted", col = "black") +
-    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0, 0.01)) +
-    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0.01, 0)) + 
-    theme_tufte() +
-    labs(x = "False Positive Rate (1-Specifity)",
-         y = "True Positive Rate (Sensitivity)",
-         title = plot_name)
-  
-  roc_plot
-}
-
-
-
 FinModelROC <- createRocPlot(roc_obj_holdout, "ROC curve for best model (RF)")
 
 
 # 3 e) How large are correlations of predicted scores on the validation set ----
     # produced by the base learners
+Get_ExSample_Preds <- function(named_model_list, test_df) {
+  ExSample_Preds <- list()
 
+  for (model in names(named_model_list)) {
+    Pred <- predict(named_model_list[[model]],newdata = test_df, type = "prob")
+    ExSample_Preds[[model]] <- as.data.frame(Pred)[,1]
+  }
+  ExSample_Preds <- ExSample_Preds %>% as.data.frame()
 
+  return(ExSample_Preds)
+}
+
+BaseLearnPreds<- Get_ExSample_Preds(final_models_3c,data_validate) 
+colnames(BaseLearnPreds) <- c("ENet","RF","GBM","XGB","KNN","SVM") 
+CorrPlot <- BaseLearnPreds %>% cor() %>% abs() %>% corrplot::corrplot(method = 'color')
+
+CorrPlot
 
 # 3 f) Create Stacked ensemble model from the base learners. ----
 
 #install.packages("caretEnsemble")
-#library(caretEnsemble)
+library(caretEnsemble)
 
 
-
+# E-Net ----
 glmEnsemble <- caretStack(
-  as.caretList(final_models_3c),
-  method = "glm",
+  as.caretList(final_models_3c[1:5]),
+  method = "glmnet",
   metric = "ROC",
+  family = 'binomial',
   trControl = trainControl(
     method = "cv",
     number = 5,
     savePredictions = "final",
     classProbs = T,
-    summaryFunction = twoClassSummary
+    verboseIter = T,
+    summaryFunction = twoClassSummary),
+  tuneGrid = expand.grid(
+    'alpha' = 10^seq(2,-5,length = 100),
+    'lambda' = c(0:10)/10
   )
 )
 
+saveRDS(glmEnsemble,"glmEnsemble.rds")
 
+# RF -----
 RF_Ensemble <- caretStack(
-  as.caretList(final_models_3c),
+  as.caretList(final_models_3c[1:5]),
   method = "ranger",
   metric = "ROC",
   tuneGrid = expand.grid(
-    .mtry = 2:6,
+    .mtry = 2:5,
     .splitrule = "gini",
     .min.node.size = seq(5,45,by = 5)), 
   trControl = trainControl(
@@ -655,25 +642,52 @@ RF_Ensemble <- caretStack(
     number = 5,
     savePredictions = "final",
     classProbs = T,
+    verboseIter = T,
     summaryFunction = twoClassSummary
   )
 )
-RF_Ensemble$ens_model
 
-final_models_3c[['Lin_Ensemble']] <- NULL
+saveRDS(RF_Ensemble,"RF_Ensemble.rds")
 
-glmEnsemble %>% summary()
-RF_Ensemble %>% summary()
-RF_Ensemble$ens_model$pred
-glmEnsemble %>% class()
+# GBM ----
+GBM_Ensemble <- caretStack(
+  as.caretList(final_models_3c[1:5]),
+  method = "gbm",
+  metric = "ROC",
+  tuneGrid = gbm_grid, 
+  trControl = trainControl(
+    method = "cv",
+    number = 5,
+    savePredictions = "final",
+    classProbs = T,
+    verboseIter = T,
+    summaryFunction = twoClassSummary
+  )
+)
 
-resamples(final_models_3c)
+saveRDS(GBM_Ensemble,"GBM_Ensemble.rds")
 
-evalm(glmEnsemble)
 
 # 3 g) Evaluate ensembles on validation set - Did prediction improve ?
+final_models_3f <- list(  
+  "Benchmark_Enet" = Benchmark_GLM,
+  "Random_Forest"  = RF_model_3c,
+  "Grad_Boost"     = GBM_model_3c,
+  "XGBoost"        = XGB_model_3c,
+  "KNN"            = KNN_model_3c,
+  "SVM_Non_Lin"    = SVM_Radial_3c,
+  'Lin_Ensemble' = glmEnsemble$ens_model,
+  'RF_Ensemble' = RF_Ensemble$ens_model,
+  'GBM_Ensemble' = GBM_Ensemble$ens_model)
+
+AUCs_3f <- GetCV_AUCs(final_models_3f,"No")
+ExSample_AUCs_3f <- Get_ExSample_AUCs(final_models_3f, data_validate)
+FinSumm_3f <- cbind(AUCs_3f,ExSample_AUCs_3f) %>% as.data.frame()
 
 
 # 3 h) Evaluate best performing model on test set. 
     # How does performance compare to validation set?
-      
+
+FinSumm_3h <- Get_ExSample_AUCs(final_models_3f, data_test)
+FinSumm_3h <- cbind(FinSumm_3f,FinSumm_3h)
+FinSumm_3h[c(3,7,9),]
