@@ -1,0 +1,983 @@
+---
+title: "Data Science In-Class Kaggle Competition Report"
+author: "Bruno Helmeczy"
+date: "11/04/2021"
+output:
+  prettydoc::html_pretty:
+    toc: yes
+    number_sections: yes
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F, eval = F)
+```
+
+# Introduction
+
+This report summarizes my efforts undertaken as part of the in-house Kaggle Competition for the Data Science 2: Machine Learning Tools class at the Central European University, as part of the MSc in Business Analytics program. As part of the competition, at the risk of "overkill", I submitted 69 predictions to the platform, achieving a best AUC score of 72.11%, which as of writing this report leads the public leaderboard. Below I try to present my approach in a semi-blog post format, avoiding so much detail as to disinterest readers, but clarifying methods tried, key lessons learned, & helper functions / processes put in place to enable submitting so many predictions efficiently. I do this by 1st presenting resulting tranformations from my EDA, & helper functions, then taking a high-level overview of my modelling efforts, & finally concluding a few lessons / key-takeaways learned that could be of help for future Kaggle competitions.     
+
+```{r Load Libs, eval = T}
+library(readr)
+library(tidyverse)
+library(data.table)
+library(caret)
+library(gbm)
+library(rpart.plot)
+library(MLeval)
+library(pROC)
+library(caTools)
+library(ggplot2)
+library(viridis)
+library(ggthemes)
+library(dplyr)
+library(stringr)
+```
+
+```{r load data}
+setwd("C:/Users/helme/Desktop/CEU/WINTER_Term/Data_Science/Machine_Learning_Courses_DS1-3/DS2/Kaggle")
+df_train <- read_csv("train.csv") %>% as.data.frame()
+df_test <- read_csv("test.csv") %>% as.data.frame()
+
+```
+
+# EDA Transformations
+
+My sole source of transformations relied on variable histograms. I aimed to achieve quasi-normally distributed values for any given variable, without regard how the target variables probability changes conditioned on a predictor variable of interest. Since i have 58 predictor variables, I figured collapsing the feature space to 2 dimensions doesn't adequetely capture any possible association pattern, and so introducing splines, polynomials & what not based on these 2d representations would seem to do more harm then good. As such, after observing the `Histograms` object outputs, I 1st filtered outlier values from `n_unique_tokens`, `num_hrefs` & `n_tokens_content`, then applied appropriate transformations. These were either `log()` or `exp()` transformations, or in some cases reducing a variable to binary, using `ifelse()`, while using flag-variables where the raw value was zero . Finally, I wrapped all variable transformations into a function, to be able to transform the test data conveniently when I want to.
+
+```{r df_transforms function}
+Histograms <- lapply(colnames(df_train), function(x) {
+  if (df_train[,x] %>% unlist() %>% is.numeric() ) {
+    df_train %>% as.data.frame() %>% ggplot(aes_string(x=x)) + geom_histogram() + 
+      labs(title = paste0("Distribution of ", x," Variable"))    
+  } else {
+    print(paste0("Variable ",x, " is not numeric"))
+  }
+})
+
+df_train <- df_train %>% filter(
+  n_unique_tokens <= 1,
+  num_hrefs <= 100,
+  n_tokens_content <= 4000) 
+
+Df_Transforms <- function(df_2_transform) {
+  df_2_transform <- df_2_transform %>% 
+    mutate(
+      abs_title_sentiment_polarity = base::ifelse(abs_title_sentiment_polarity == 0,0,1),
+      title_sentiment_polarity = base::ifelse(title_sentiment_polarity == 0,0,1),
+      max_negative_polarity = max_negative_polarity %>% exp() %>% exp(),
+      max_positive_polarity = base::ifelse(max_positive_polarity >= 0.9,1,0),
+      min_positive_polarity = (min_positive_polarity+0.01) %>% log(),
+      LDA_04 = base::ifelse(LDA_04 <= 0.05,0,1),
+      LDA_03 = base::ifelse(LDA_03 <= 0.05,0,1),
+      LDA_02 = base::ifelse(LDA_02 <= 0.05,0,1),
+      LDA_01 = base::ifelse(LDA_01 <= 0.05,0,1),
+      self_reference_avg_sharess = (self_reference_avg_sharess+1) %>% log(),
+      self_reference_min_shares = (self_reference_min_shares+1) %>% log(),
+      kw_max_avg = (kw_max_avg + 10) %>% log(),
+      kw_min_avg_flag = base::ifelse(kw_min_avg == 0, 1, 0),
+      kw_max_max_flag = base::ifelse(kw_max_max < max(kw_max_max),1,0),
+      kw_min_max_flag = base::ifelse(kw_min_max == 0 ,1,0),
+      kw_min_max = (kw_min_max + 10) %>% log(),
+      num_videos_flag = base::ifelse(num_videos == 0,1,0),
+      num_imgs = (num_imgs + 1 ) %>% log(),
+      num_hrefs_log = (num_hrefs + 1 ) %>% log(),
+      n_non_stop_words = base::ifelse(round(n_non_stop_words,3) == 1,1,0),
+      n_tokens_content = (n_tokens_content+1) %>% log()
+    )  
+  return(df_2_transform)
+}
+df_train <- Df_Transforms(df_train) 
+df_train$is_popular <- factor(df_train$is_popular, level = c(1,0), labels = c("Yes","No"))
+
+```
+
+
+# Setup - Helper Functions & Parallel Processing 
+
+Throughout my Modeling efforts, I wanted a quick & convenient way to check model performance, be that cross-validated AUC values, or AUC values on a validation dataset. `GetCV_AUCs()` does the former, while `Get_ExSample_AUCs()` the latter. The same goes for easily creating predictions from a (set of) model(s), which is achieved by `Get_ExSample_Preds()`. 
+
+`GetCV_AUCs()` loops through every fold of every model, after finding model results for the selected besttune, calculates & stores AUC values for every fold, then calculates its mean AUC value for every model. In essence this replicates the `resamples()` function from `caret`, but can be applied also when using different cross-validation types, though that may be akin to comparing apples to oranges. An alternative, probably simpler approach would find the highest ROC value in every model objects' `results` table, since we are to select based on the ROC metric.
+
+`Get_ExSample_AUCs()` takes a validation dataset, & loops through a named list of models, to generate a probability prediction with `caret::predict(,type = "prob")`. This yields 2 columns, the complementary probabilities of eithre value of the target variable. I arbitrariliy take the 1st column, of 'Yes', then I calculate AUC values with `pROC::roc()` & get rid of the predictions themselves.
+
+`Get_ExSample_Preds()` similarly to `Get_ExSample_AUCs()` makes predictions, & optionally generates csv files with the respective model's name, while also returning a dataframe of predictions, useful for finding linear combinations of prediction, i.e. model stacking, or calling `stats::cor()` to check predictions' correlations.
+
+```{r Helpers & Parallel}
+# 0) Helper Functions ----
+
+GetCV_AUCs <- function(named_model_list,control_value) {
+  CV_AUC_folds <- list()
+  
+  for (model_name in names(named_model_list)) {
+    auc <- list()
+    model <- named_model_list[[model_name]]
+    
+    for (fold in model$pred$Resample %>% unique()) {
+      cv_fold <- model$pred %>% filter(Resample == fold)
+      TuneParams <- model$bestTune %>% colnames()
+      
+      for (param in TuneParams) {
+        cv_fold <- cv_fold[cv_fold[,param] == model$bestTune[,param],]
+      }
+      
+      roc_obj <- roc(cv_fold$obs, cv_fold[,c(control_value)])
+      auc[[fold]] <- as.numeric(roc_obj$auc) 
+    }
+    
+    CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
+                                             "AUC" = unlist(auc))
+  }
+  
+  CV_AUC <- list()
+  for (model_name in names(named_model_list)) {
+    CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC) %>% round(4)
+  }
+  
+  AUCs <- CV_AUC %>% cbind() %>% as.data.frame()
+  colnames(AUCs) <- "Model_AUC"
+  
+  return(AUCs)
+}
+
+Get_ExSample_AUCs <- function(named_model_list, test_df) {
+  ExSample_AUCs <- list()
+  
+  for (model in names(named_model_list)) {
+    Pred <- predict(named_model_list[[model]],newdata = test_df, type = "prob")
+    test_df[,model] <- as.data.frame(Pred)[,1]
+    test_df$pred <- as.data.frame(Pred)[,1]
+    ExSample_AUCs[[model]] <- roc(test_df$is_popular,test_df$pred)$auc %>% round(4)
+  }
+  
+  findf <- ExSample_AUCs %>% cbind() %>% as.data.frame()
+  colnames(findf) <- "Ex_Sample_AUC"
+  test_df$pred <- NULL
+  return(findf)
+}
+
+Get_ExSample_Preds <- function(named_model_list, test_df,  Gen_CSVs = FALSE) {
+  ExSample_Preds <- list()
+  
+  model <- names(named_model_list)[1]
+  for (model in names(named_model_list)) {
+    Pred <- predict(named_model_list[[model]],newdata = test_df, type = "prob")
+    ExSample_Preds[[model]] <- as.data.frame(Pred)[,1]
+    
+    if (Gen_CSVs == TRUE) {
+      SubFile <- NULL
+      SubFile$article_id <- test_df$article_id
+      SubFile$score <- as.data.frame(Pred)[,1]
+      SubFile <- SubFile %>% as.data.frame()
+      
+      readr::write_csv(SubFile,paste0("BH_DS2_",Sys.Date(),"_",model,"_model_sub.csv"))
+    }
+  }
+  ExSample_Preds <- ExSample_Preds %>% as.data.frame()
+  return(ExSample_Preds)
+}
+
+```
+
+
+My next setup 'trick' was to allow parallel processing of models. As intend to use repeated cross-validation for more robust results, foreseeably long tuning grids, & I also like to think my PC is fairly strong, I tried commiting more processing power to my modelling efforts. I did so with the `parallel` & `doParallel` packages, by 1st detecting the number of cores in my PC with `detectCores()`, then creating a cluster with `makePSOCKcluster()` with given number of cores (in this case 6 of 8, to allow my PC to be useful while models are running), & finally using `registerDoParallel()` to launch the cluster. From this point on, `caret::trainControl()` function sets the argument `allowParallel` to TRUE by default, making any model run in parallel as possible (e.g. tree-based models are better suited for parallel processing vs penalized models, though in any case different folds of a model are suitable), When finished, the `stopCluster()` function de-registers the cluster.
+
+```{r Parallel setup}
+#install.packages('parallel')
+#install.packages("doParallel")
+library(doParallel)
+library(parallel)
+
+# Check Nr of cores & make cluster of it
+no_cores <- detectCores(logical = TRUE)
+cl <- makePSOCKcluster(no_cores-2)
+
+registerDoParallel(cl) # Register Cluster for parallel processing
+stopCluster(cl) ## When you are done: Do before shutting down :D 
+
+```
+
+# Modelling 
+
+Throughout my modelling journey for this competition, I certainly tried various train-validation splits of the data, as much as different trainControl methods. after a very brief stint of using train-validate-test split, I merged the train & validation datasets to obtain 2 train-validation splits, 75-25 & 80-20 splits.
+
+```{r createDataPartitions}
+
+###  80-20 split -> for 10x3 CVwith indices ----
+set.seed(1)
+train_indices <- as.integer(createDataPartition(df_train$is_popular, p = 0.5, list = FALSE))
+data_train <- df_train[train_indices, ]
+data_holdout <- df_train[-train_indices, ]
+
+set.seed(1)
+train_indices <- as.integer(createDataPartition(data_holdout$is_popular, p = 0.6, list = FALSE))
+data_validate <- data_holdout[train_indices, ]
+data_test <- data_holdout[-train_indices, ]
+data_holdout <- NULL
+data_valid_n_train <- rbind(data_train, data_validate)
+
+### 75-25
+set.seed(1)
+train_indices_75 <- as.integer(createDataPartition(df_train$is_popular, p = 0.75, list = FALSE))
+data_valid_n_train_75 <- df_train[train_indices_75, ]
+data_holdout_25 <- df_train[-train_indices_75, ]
+
+```
+
+
+Appropriately, I would also have different traincontrol objects for the 2 train-test splits, while also trying out 5x5 & 10x3 repeated cross-validations. Note that in all cases I speciifed explicitly the rox indices to be used in each fold, using the `createFolds()` & `createMultiFolds()` functions. I made the mistake however that i specified an object resulting from `createFolds` as indexes into the 1st traincontrol object, eventhough i wanted to do repeated cross-validation. Thus, unknowingly, my early modelling attempt all used simple cross-validation, hence the multiple traincontrol objects. Also note, that in the interest of saving memory, I did not save any Predictions, & specificed allowParallel explicitly, eventhough it is set to true by defualt.
+
+```{r traincontrol objects}
+
+# 10-fold cross validation - Rep 3x ----
+MyFolds <- createFolds(data_valid_n_train$is_popular, k = 10)
+MyFolds_10x3 <- createMultiFolds(data_valid_n_train$is_popular, k = 10, times = 3)
+MyFolds_10x3_75 <- createMultiFolds(data_valid_n_train_75$is_popular, k = 10, times = 3)
+
+train_control <- trainControl(
+  index = MyFolds,
+  method = "repeatedcv",
+  number = 10,
+  repeats = 3,
+#  verboseIter = TRUE,
+  summaryFunction = twoClassSummary,
+  classProbs = T,
+  savePredictions = "none",
+  allowParallel = TRUE)
+
+# 10x3_80 ----
+train_control_10_3 <- trainControl(
+  index = MyFolds_10x3,
+  method = "repeatedcv",
+  number = 10,
+  repeats = 3,
+  verboseIter = TRUE,
+  summaryFunction = twoClassSummary,
+  classProbs = T,
+  savePredictions = "none",
+  allowParallel = TRUE)
+
+# 10x3_75 ----
+train_control_10_3_75 <- trainControl(
+  index = MyFolds_10x3_75,
+  method = "repeatedcv",
+  number = 10,
+  repeats = 3,
+  verboseIter = TRUE,
+  summaryFunction = twoClassSummary,
+  classProbs = T,
+  savePredictions = "none",
+  allowParallel = TRUE)
+
+# Alternative: 5x5 repeated cv -----
+MyFolds_5_5 <- createMultiFolds(data_valid_n_train_75$is_popular, k = 5, times = 5)
+
+train_control_5_5 <- trainControl(
+  index = MyFolds_5_5,
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5,
+  verboseIter = TRUE,
+  summaryFunction = twoClassSummary,
+  classProbs = T,
+  savePredictions = "none",
+  allowParallel = TRUE)
+```
+
+## Penalized Linear Models
+
+My 1st models, serving as baselines, were penalized linear models, in 1 case simply regularizing predictor variables, in the other also utilizing PCA. I used all variables excluding article_id, while my prediction results were around 0.67-0.689 AUC. The best-tuned model yielded `alpha = 1` & `lambda = 0.007`, i.e. returning a LASSO model.
+
+```{r GLMs}
+
+# My E-Net Grid & Model ----
+ENet_tunegrid <- expand.grid(
+  "alpha"  = (0:10)/10,
+  "lambda" = 10^seq(-1,-5,length=150)
+)
+
+set.seed(123456789)
+Benchmark_GLM <- train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "glmnet",
+  metric = "ROC",
+  family = "binomial",
+  preProcess = c("center","scale"),
+  trControl = train_control,
+  tuneGrid = ENet_tunegrid,
+  na.action = na.exclude
+)
+
+# E_net w PCA ----
+set.seed(123456789)
+GLM_pca <- train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "glmnet",
+  metric = "ROC",
+  family = "binomial",
+  preProcess = c("center","scale","pca"),
+  trControl = train_control,
+  tuneGrid = ENet_tunegrid,
+  na.action = na.exclude
+)
+
+```
+
+## Random Forests
+
+My 2nd model family, Random Forests proved to be a meaningful improvement, already highlighted tree-based methods to be superior for the problem at hand. I tested `.mtry` for odd numbers between 1-21, & minimum splitting node size between 5-45 by increments of 10. Interestingly, `.mtry = 1` proved to be the best choice, meaning the model preformed best when randomly selecting a variable based on which to split a node, suggesting there are hardly any variables which explain an articles' popularity better than others. Random Forests did give a significant improvement over Penalized linear models however, reaching final AUC of 0.7124, i.e. it would have placed 1st on the public leaderboard during last year's cohort (& as of this writing 11th on the public leaderboard this year).
+
+```{r RFs}
+
+# 2. b) Random Forest -----
+rf_tune_grid <- expand.grid(
+  .mtry = (1:11)*2-1,
+  .splitrule = "gini",
+  .min.node.size = seq(5,45,by = 10) 
+)
+
+# RF Re-Fit ----
+set.seed(123456789)
+RF_model_ReFit_2 <- train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "ranger",
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid = rf_tune_grid,
+  na.action=na.exclude
+)
+
+# RF Re-Fit PCA ----
+set.seed(123456789)
+RF_ReFit_pca <- train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "ranger",
+  metric = "ROC",
+  preProcess = c("center","scale","pca"),
+  trControl = train_control,
+  tuneGrid = rf_tune_grid,
+  na.action=na.exclude
+)
+
+```
+
+## Gradient Boosting Machines
+
+I also applied GBM methods, though to no great avail. I tuned 2 models, testing interaction depths of 3,5,7,8; minimum required observations to split a node between 5-45 by intervals of 5; shrinkage of 0.001 - 0.01 & between 500-1500 trees. My resulting AUC were around 0.69, so I gave up on this method to move onto XGBoost models.
+
+## eXtreme Gradient Boosting Machines
+
+Tuning this model family represents the bulk of my efforts in trying to win this competition, giving 49 of my 69 total prediction submissions. Part of the reason for this is an early indication of its potential, its' 5th iteration already giving AUC of 0.715, another part of it being me not being too familiar with tuning XGBoost models, i.e. this context giving me a good opportunity to explore each tuning parameters' effect on model performance. I like to think about this model tuning in terms of phases:
+
+**Phase 1:** As a 1st go to make XGB models work, I gave a range of value to each parameter, observed the tuning grids' resulting models' cross-validated AUC values & defined the next models' ranges based on those. 1 could also see a few obvious mistakes, e.g. `min_child_weight < 1` in XGB1-3. After a little reading, I realised this is the equivalent of minimum required observations to split a node & adjusted the tuning parameter appropriately afterwards. You can also see I started off testing large amount of trees, & only by model 5 I tested 500 trees, which proved to be the best choice, along with maximum tree depth of 11, gamma & eta of 0.01, min child weight of 1, subsample of 0.8 & colsample-by-tree of 0.75. These parameters yielded an AUC of 0.71501, good for 8th place as of writing this report. 
+
+```{r XGB 1st Go}
+
+# 2. c2) XGBoost -----
+## XGB1 ----
+xgb_grid <-  expand.grid(
+  nrounds=c(2000,1250),
+  max_depth = (2:4)*2+1,
+  eta = c(0.03,0.05, 0.06),
+  gamma = c(0.01),
+  colsample_bytree = seq(75,95,by =10 )/100,  
+  min_child_weight = (1:5)/10,
+  subsample = c(0.75))
+
+set.seed(123456789)
+XGB_model <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid)
+
+## XGB2 ----
+xgb_grid2 <-  expand.grid(
+  nrounds=c(1750,1250),
+  max_depth = (4:5)*2+1,
+  eta = c(0.02,0.03),
+  gamma = c(0.01,0.02),
+  colsample_bytree = 0.75,  
+  min_child_weight = (1:3)/20,
+  subsample = c(0.8))
+
+set.seed(123456789)
+XGB_model2 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid2)
+
+## XGB3 ----
+xgb_grid3 <-  expand.grid(
+  nrounds=c(1250),
+  max_depth = (5)*2+1,
+  eta = c(0.01,0.02),
+  gamma = c(0.01,0.02),
+  colsample_bytree = 0.75,  
+  min_child_weight = c(1,3,5)/20,
+  subsample = c(0.8))
+
+set.seed(123456789)
+XGB_model3 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid3)
+
+## XGB4 ----
+xgb_grid4 <-  expand.grid(
+  nrounds=c(1250),
+  max_depth = (5)*2+1,
+  eta = c(0.01,0.1,0.2),
+  gamma = c(0.01,0.02),
+  colsample_bytree = 0.75,  
+  min_child_weight = c(1,5,10),
+  subsample = c(0.8,1))
+
+set.seed(123456789)
+XGB_model4 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid4)
+
+## XGB5 ----
+xgb_grid5 <-  expand.grid(
+  nrounds=c(1500,1250,1000,750,500),
+  max_depth = (4:5)*2+1,
+  eta = c(0.01),
+  gamma = c(0.01),
+  colsample_bytree = 0.75,  
+  min_child_weight = c(1,10),
+  subsample = c(1))
+
+set.seed(123456789)
+XGB_model5 <-  caret::train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid5)
+
+```
+
+**Phase 2:** After a little further reading, I understood `gamma` is ca. the pruning parameter, i.e. the minimum required improvement by a split, `eta` is the learning rate from tree-to-tree & of which too-high values can easily result in over-fitting, `colsample_bytree` is randomly selecting a % of all variables based on which to fit a decision-tree, & `subsample` is randomly sub-setting a % of observations from the given training data. 
+
+Armed with this knowledge I took a 2nd attempt at fitting few models with different parameters, looking to explore their effects. I read usually a `max_depth <= 6` works fine, while I recalled Random Forests to have worked best with minimum observation nodes of ca. 15-25, & were best-off with randomly selecting 1 variable based on which to split a node. I also wanted to relax gamma vis-a-vis previous models. So, in the below 6 models I explored the effects of gradually reducing `max_depth`s, & `colsample_bytree`. I found XGB_7 to work best, improving my Kaggle AUC by 0.05%, to 0.71157, & reducing colsample by tree all the way to 0.2 in XGB_11 over-fitted the model, yielding higher AUCs even on the validation set, but gradually worsening results on the test set. 
+
+```{r XGB 2nd Go}
+
+## XGB6 ----
+xgb_grid6 <-  expand.grid(
+  nrounds=c(500),
+  max_depth = c(3,4)*2+1,
+  eta = c(0.01),
+  gamma = c(0.005),
+  colsample_bytree = c(0.8,0.9),  
+  min_child_weight = c(1,5,10,20),
+  subsample = c(0.8,1))
+
+set.seed(123456789)
+XGB_model6 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid6)
+
+XGB_model6$bestTune
+XGB_model6$results %>% arrange(desc(ROC))
+
+baseModels[["XGB_6"]] <- XGB_model6
+
+## XGB7 ----
+xgb_grid7 <-  expand.grid(
+  nrounds=c(500),
+  max_depth = c(11,9), #*2+1,
+  eta = c(0.01),
+  gamma = c(0.005),
+  colsample_bytree = c(0.6,0.75),  
+  min_child_weight = c(1,5,10,20),
+  subsample = c(1,0.8))
+
+set.seed(123456789)
+XGB_model7 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid7)
+
+XGB_model7$bestTune
+XGB_model7$results %>% arrange(desc(ROC))
+
+baseModels[["XGB_7"]] <- XGB_model7
+
+## XGB8 ----
+xgb_grid8 <-  expand.grid(
+  nrounds=c(500),
+  max_depth = c(9), #*2+1,
+  eta = c(0.01),
+  gamma = c(0.005),
+  colsample_bytree = c(0.4,0.5,0.6),  
+  min_child_weight = c(10,20),
+  subsample = c(0.8))
+
+set.seed(123456789)
+XGB_model8 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid8)
+
+XGB_model8$bestTune
+XGB_model8$results %>% arrange(desc(ROC))
+
+## XGB9 ----
+xgb_grid9 <-  expand.grid(
+  nrounds=c(500,350),
+  max_depth = c(4,6), #*2+1,
+  eta = c(0.01),
+  gamma = c(0.01),
+  colsample_bytree = c(0.3,0.4),  
+  min_child_weight = c(20,30),
+  subsample = c(0.7,0.8))
+
+set.seed(123456789)
+XGB_model9 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid9)
+
+XGB_model9$bestTune
+XGB_model9$results %>% arrange(desc(ROC))
+
+## XGB10 ----
+xgb_grid10 <-  expand.grid(
+  nrounds=c(1000,500),
+  max_depth = c(4,6,11), #*2+1,
+  eta = c(0.01),
+  gamma = c(0.01),
+  colsample_bytree = c(0.2,0.3),  
+  min_child_weight = c(1,10,20),
+  subsample = c(1))
+
+set.seed(123456789)
+XGB_model10 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid10)
+
+XGB_model10$bestTune
+XGB_model10$results %>% arrange(desc(ROC))
+
+
+## XGB11 ----
+xgb_grid11 <-  expand.grid(
+  nrounds=c(2000,1750,1500,1250,1000,750,500,350),
+  max_depth = c(6), #*2+1,
+  eta = c(0.01),
+  gamma = c(0.01),
+  colsample_bytree = c(0.1,0.2),  
+  min_child_weight = c(1,20),
+  subsample = c(0.8))
+
+set.seed(123456789)
+XGB_model11 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control,
+  tuneGrid= xgb_grid11)
+
+XGB_model11$bestTune
+XGB_model11$results %>% arrange(desc(ROC))
+
+
+
+
+```
+
+**Phase 3:** At this point trying to further improve my score, I tried 1st increasing the training data to 90% & 80%, which resulted in lower prediction scores. Then, I realised I wasn't doing 3-times repeated 10-fold cross-validation as I thought I would, as I specified the index argument in my 1st traincontrol object by using `createFolds()`, rather then `createMultiFolds()`. So, I re-specified my fold-indices as shown above, & tried both 5-times repeated 5- & 10-fold cross-validation on my few best XGBoost models.
+
+As can be seen below, I again tried a few different values for `colsample_bytree` & `subsample` however to no avail. XGB_7 was still the best model, & yielded an AUC of 0.71778, good for 5th place in the competition at the time of this writing. I also found 5-time repeated 5-fold cross-validation yields better results vs 10x5, or 10x3 cross-validation, so I settled for that going forward.
+
+```{r XGB 3rd go}
+
+## XGB7_75 - 5x5 CV - 75-25 train-test split -----
+set.seed(123456789)
+XGB_model7_75 <-  train(
+  is_popular ~ .,
+  data = data_valid_n_train_75 %>% select(-article_id) ,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control_5_5,
+  tuneGrid= xgb_grid7)
+
+## XGB7_75a - 5x5 CV - 75-25 train-test split -----
+set.seed(123456789)
+XGB_model7_75a <-  train(
+  is_popular ~ .,
+  data = training_data_75 %>% select(-article_id) ,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control_5_5,
+  tuneGrid= expand.grid(
+    nrounds=c(500),
+    max_depth = c(9), #*2+1,
+    eta = c(0.01),
+    gamma = c(0.005),
+    colsample_bytree = c(0.5,0.6),  
+    min_child_weight = c(20),
+    subsample = c(0.8,0.7,0.6)))
+
+## XGB7_75b - 5x5 CV - 75-25 train-test split -----
+set.seed(123456789)
+XGB_model7_75b <-  train(
+  is_popular ~ .,
+  data = training_data_75 %>% select(-article_id) ,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control_5_5,
+  tuneGrid= expand.grid(
+    nrounds=c(500),
+    max_depth = c(9), #*2+1,
+    eta = c(0.01),
+    gamma = c(0.005),
+    colsample_bytree = c(0.6),  
+    min_child_weight = c(10,20),
+    subsample = c(0.8,0.7,0.6,0.5)))
+
+## XGB7_75 - 10x3 CV - 75-25 train-test split -----
+set.seed(123456789)
+XGB_model7_75_10_3 <-  train(
+  is_popular ~ .,
+  data = training_data_75 %>% select(-article_id) ,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control_10_3_75,
+  tuneGrid=  expand.grid(
+    nrounds=c(500),
+    max_depth = c(11,9), #*2+1,
+    eta = c(0.005,0.01),
+    gamma = c(0.005),
+    colsample_bytree = c(0.6),  
+    min_child_weight = c(20),
+    subsample = c(0.8)))
+
+## XGB8_75_5_5 ----
+set.seed(123456789)
+XGB_model8_75_5_5 <-  train(
+  is_popular ~ .,
+  data = training_data_75 %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control_5_5,
+  tuneGrid= xgb_grid8)
+
+## XGB11_75_5_5 ----
+set.seed(123456789)
+XGB_model11_75_5_5 <-  train(
+  is_popular ~ .,
+  data = training_data_75 %>% select(-article_id),
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = train_control_5_5,
+  tuneGrid= expand.grid(
+    nrounds=c(350),
+    max_depth = c(6), #*2+1,
+    eta = c(0.01),
+    gamma = c(0.005),
+    colsample_bytree = c(0.3,0.4,0.5),  
+    min_child_weight = c(20),
+    subsample = c(0.8)))
+
+
+
+```
+
+**Phase 4:**  At this point some friendly, competitiveness surfaced, while we developed a habit of comparing our results during the year already. 1 key takeaway from these discussions were that many competitors fitted their models to the complete training dataset. With no harm in trying, I did so too, again using my best models, but exploring a few different parameter values for `gamma` & `min_child_weight`. This gave me an AUC of 0.71858, or a roughly 0.08% improvement. 
+
+```{r XGB 4th go}
+
+## XGB7_75 - 5x5 CV - fit to total training data -----
+set.seed(123456789)
+XGB_model7_75_full <-  train(
+  is_popular ~ .,
+  data = df_train %>% select(-article_id) ,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = trainControl(
+    method = "repeatedcv",number = 5,repeats = 5,
+    verboseIter = TRUE, summaryFunction = twoClassSummary, classProbs = T,
+    allowParallel = TRUE),
+  tuneGrid= expand.grid(
+    nrounds = 500,
+    max_depth = 9,
+    eta = 0.01,
+    gamma = c(0.005,0.001),
+    colsample_bytree = 0.6,
+    min_child_weight = c(10,20),
+    subsample = 0.8))
+
+```
+
+The other key takeaway from in-class discussions was other including `article_id` in their explanatory variables, & with improvement in the neighbourhood of 0.3%. At that point being about 0.25% below 1st place, & no idea how else to improve my prediction scores, I figured 'why-not'. 
+
+In effort to rationalize the decision to include articles' IDs, one could argue a news platform generally grows over time, & the number of visitors have a bearing on how popular an article is going to be, therefore later/more recent articles should have a tendency to be more famous then earlier ones, which can be captured by the `article_id` variable, assuming it is assigned to articles in an ordered fashion. Despite no proof whether article_id's are ordered, no such visible tendency from LOESS curves, & a generally bas practice to include IDs as explanatory variables, I went ahead & tried, again with a few different exact specifications as seen below. 
+
+To my suprise, this resulted in my currently leading public score, with an AUC of 0.7211, i.e. a 0.25% imrpovement over my previous model, that was also trainined on the full training dataset, with the same parameters. After finding the best-tuned model, I also ran it with 5x repeated 10-fold cross-validation, reaching slightly worse results. All in all, I found my final model.
+
+```{r XGB finals}
+
+## XGB7_75 - 5x5 CV - fit to total training data inc. article -----
+df_train$article_id <- df_train$article_id %>% as.numeric()
+
+set.seed(123456789)
+XGB_model7_75_full_art <-  caret::train(
+  is_popular ~ .,
+  data = df_train,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = trainControl(
+    method = "repeatedcv",number = 5,repeats = 5,
+    verboseIter = TRUE, summaryFunction = twoClassSummary, classProbs = T,
+    allowParallel = TRUE),
+  tuneGrid= expand.grid(
+    nrounds = 500,
+    max_depth = 9,
+    eta = 0.01,
+    gamma = c(0.005,0.001),
+    colsample_bytree = 0.6,
+    min_child_weight = c(10,20),
+    subsample = c(0.7,0.8)))
+
+## XGB7_75 - 10x5 CV - fit to total training data inc. article -----
+set.seed(123456789)
+XGB_model7_10x5_full_art <-  caret::train(
+  is_popular ~ .,
+  data = df_train,
+  method = "xgbTree", # xgbDART / xgbLinear / xgbTree
+  metric = "ROC",
+  trControl = trainControl(
+    method = "repeatedcv",number = 10,repeats = 5,
+    verboseIter = TRUE, summaryFunction = twoClassSummary, classProbs = T,
+    allowParallel = TRUE),
+  tuneGrid= expand.grid(
+    nrounds = 500,
+    max_depth = 9,
+    eta = 0.01,
+    gamma = c(0.001),
+    colsample_bytree = 0.6,
+    min_child_weight = c(10,20),
+    subsample = c(0.7)))
+
+```
+
+
+## Neural Nets
+
+To predict new article popularity, I used both the Keras-approach learned recently, as well as the `caret::train()` approach, using the `"nnet"` method. `caret`'s `nnet` method allows 2 parameters, `size` i.e. the number of neurons, & `decay`, equivalent/similar to dropout rates in the `keras` framework. Running the model with 75% of the training data, with 5x5 repeated cross-validation, yielded 0.69974 AUC in the best of cases. 
+
+I also applied dense neural nets using `keras` after appropriate transformations as shown below. I 1st used a for loop to scael each columns' values to between 0-1, by adding to each column vector its' minimums' absolute value, than dividing the resulting vector by the resulting vectors' maximum value. I converted the outcome variables to dummy variable table using `to_categorical()` & sampled 20000 observations as training data, using the remaining observations as the validation set. After fitting a 3-layer neural net through 1000 epochs, the fit history showed no improvement (or any change in validation accuracy) whatsoever, perhaps indicating neural nets not to be a suitable approach for the problem at hand. The `keras` approach also yielded AUC results of 0.69 in the best case.
+
+```{r NNets }
+
+# NNet ----
+nnet_grid <- expand.grid(
+  size = 3:7,
+  decay = seq(4.5,6.5,by=0.2))
+
+set.seed(123456789)
+nnet_model <- caret::train(
+#  is_popular ~ .,
+  method = "nnet",
+  x = training_data_75 %>% select(-c(article_id,is_popular)),
+  y = training_data_75$is_popular,
+  trControl = train_control_5_5,
+  tuneGrid = nnet_grid,
+  preProcess = c("center", "scale", "pca"),
+    # decay: regularization, has to center and scale like with Ridge, Lasso
+    # PCA: correlated variables are problematic for gradient-based optimization
+  metric = "ROC",
+  # avoid extensive iteration output
+  trace = FALSE
+)
+
+# Keras Version ----
+library(keras)
+library(tensorflow)
+
+# Regularize datasets
+  # add minimum -> divide by maximum 
+df_train_nn <- select(df_train,-c( is_popular))
+
+for (i  in colnames(df_train_nn)) {
+  col <- df_train_nn[,c(i)] %>% as.data.frame()
+  col2 <- col + abs(min(col))
+  col3 <- col2 / max(col2)
+  df_train_nn[,c(i)] <- col3
+}
+
+df_train_nn
+
+df_train_keras <- as.matrix(df_train_nn)
+df_train_keras_y <- ifelse(df_train$is_popular == "Yes",1,0)
+df_train_keras_y <- to_categorical(as.numeric(df_train$is_popular)-1,2)
+
+trainindices <- sample(seq(nrow(df_train_keras)), 20000)
+
+df_train_4_nn <-  df_train_keras[trainindices,]
+df_valid_4_nn <-  df_train_keras[-trainindices,]
+df_train_4_nn_y <- df_train_keras_y[trainindices,]
+df_valid_4_nn_y <- df_train_keras_y[-trainindices,]
+
+df_test_nn <- Df_Transforms(select(df_test,-c(article_id)))
+for (i  in colnames(df_test_nn)) {
+  col <- df_test_nn[,c(i)] %>% as.data.frame()
+  col2 <- col + abs(min(col))
+  col3 <- col2 / max(col2)
+  df_test_nn[,c(i)] <- col3
+}
+
+df_test_keras <- as.matrix(df_test_nn)
+df_test_articles <- df_test$article_id
+
+# Network design
+model <- keras_model_sequential()
+model %>%
+  # Input layer
+  layer_dense(units = 32, activation = "relu", input_shape =  ncol(df_train_keras)) %>% 
+  layer_dropout(rate = 0.2) %>% 
+  # Hidden layer
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dropout(rate = 0.2) %>% 
+  
+  layer_dense(units = 8, activation = "relu") %>%
+  layer_dropout(rate = 0.2) %>%
+  
+  # Output layer
+  layer_dense(units = 2, activation = "sigmoid")
+
+# Network config
+#history <-
+model %>% compile(loss = "binary_crossentropy",
+  optimizer = optimizer_rmsprop(),metrics = c("accuracy"))
+
+# Running our data
+model %>% fit(
+  df_train_4_nn, df_train_4_nn_y, 
+  epochs = 1000, 
+  batch_size = 500,
+  validation_data = list(df_valid_4_nn,df_valid_4_nn_y)
+)
+
+df <- data.frame(preds = model %>% predict_proba(df_valid_4_nn),
+                 ref = as.numeric(df_train$is_popular[-trainindices])-1)
+
+auc <- pROC::roc(df$ref,df$preds.1 )$auc %>% round(4)
+
+model %>% predict_proba(df_train_4_nn)
+
+data.frame(article_id = df_test$article_id,score = predict_proba(model,df_test_keras)[,1]) %>% 
+  write_csv("Keras1.csv")
+```
+
+# Lessons Learned
+
+Throughout doing this competition, a number of key lessons emerged to take away for future competitions. As it very well may be that Kaggle would serve as the platform to explore & implement newly learned concepts, or refresh old ones by participating in external competitions, it may be useful for readers with similar outlooks.
+
+**Storing Models:** After the 2nd batch of XGBoost models I made the mistake of re-running my model with different tuning parameters in hopes of improving my results. Before, I knew it, I lost my model, & with it about 12 hours to eventually re-create it again. I could have easily avoided this by establishing & storing a named model list earlier in the process (the same named model list you could pass to the helper functions defined above, or the `caret::resamples()` function to compare models whom were optimized with the same number of folds). Once having such a named model list, assigning new models is easy, just as stroing & reading in said list:
+
+```{r stor models}
+
+baseModels <- list("Enet" = Benchmark_GLM,
+                  "RF_80p" = RF_model_ReFit_2,
+                   "GBM_1" = GBM_model_1,
+                   "GBM_2" = GBM_model_2,
+                   "XGB_1" = XGB_model,
+                   "XGB_2" = XGB_model2,
+                   "XGB_3" = XGB_model3,
+                   "XGB_4" = XGB_model4,
+                   "XGB_5" = XGB_model5,
+                   "XGB_6" = XGB_model6,
+                   "XGB_7" = XGB_model7,
+                   "XGB_7a" = XGB_model7a,
+                   "XGB_8" = XGB_model8,
+                   "XGB_9" = XGB_model9,
+                   "XGB_10" = XGB_model10,
+                   "XGB_11" = XGB_model11
+)
+
+# To add e.g. the final best model:
+baseModels[['XGB7_5_5_100_art']] <- XGB_model7_75_full_art
+
+# Set working directory to save the named model list
+setwd("C:/Users/helme/Desktop/CEU/WINTER_Term/Data_Science/Machine_Learning_Courses_DS1-3/DS2/Kaggle/Model_Objects")
+
+# Give a nice descriptive name + todays date & time for for-sure uniqueness
+baseModels_name <- gsub("-|:","_",paste0("All_Current_Models_",Sys.Date(),
+                          "_",unlist(str_split(Sys.time()," "))[2] ,".rds"))
+saveRDS(baseModels,baseModels_name)
+
+for (i in names(baseModels)) {
+  modelname <- gsub("-|:","_",
+                    paste0(i,"_",Sys.Date(),
+                           "_",unlist(str_split(Sys.time()," "))[2],".rds"))
+  
+  saveRDS(baseModels[[i]],modelname)
+}
+
+# Download & Read in e.g. most recent version - e.g. final best model
+GithubRDS_Folder <- "https://raw.githubusercontent.com/BrunoHelmeczy/Machine_Learning_Courses_DS1-3/main/DS2/Kaggle/Model_Objects"
+
+download.file(paste0(GithubRDS_Folder,"XGB7_5_5_100_art_2021_04_11_19_28_47.rds"),
+"XGB7_5_5_100_art.rds", method = "curl")
+XGB7_5_5_100_art <- readRDS("XGB7_5_5_100_art.rds")
+
+```
+
+**createMultiFolds:** As mentioned, after my 1st few rounds of modelling, I realized I used `createFolds()` rather then `createMultiFolds()`, to specify the row indices for any given fold of either repeat. One would most obviously use the `index` argument of `trainControl()` when looking to stack caret model objects, since its a pre-requisite both for `caretStack()` & `caretEnsemble()`.
+
+```{r foldseg }
+
+MyFolds <- createFolds(data_valid_n_train$is_popular, k = 10)
+MyFolds_10x3 <- createMultiFolds(data_valid_n_train$is_popular, k = 10, times = 3)
+
+```
+
+**Model tune length & Parallel Processing:** As shown above, a cluster can be registered when training caret model objects, & thus parallel processing can easily be implemented. However, the key message I believe was the superiority in defining much smaller tuning grids, evaluating the results, & deciding on the next grid based on that. Alternatively, e.g. by defining 108 long tuning grid, with 5x5 repeated cross-validation for a XGboost model can easily result in 16 hour runtime, especially with 9-11 maximum tree depth. Additionally, it may have been my fault somehow, but no training log is printed when parallel processing is implemented, so I didnt have any idea how long would a model still have to train to finish.
+
+**Using all Training Data:** Initially, I split my dataset into training, validation & test data sets, thinking for example to fit base models on the 40% training data & validate it on 30%, then use this 70% to re-fit all base models & a stacked ensemble on top, checking its performance on the remaining 30% before submission. Another benefit was model training faster in the beginning, while gradually adding data improved test results, & I would most likely avoid over-fitting the training & test data, especially in the beginning when the models themselves aren't well-calibrated. It turned out that if 1 would like to split the data to train-validation sets, a 75-25 split yielded highest accuracy results. However, using all available training data to re-fit a final best model improves results, in my case from AUC 0.71778 to 0.71867, i.e. 0.09%. 
+
+`article_id` **:** Finally, a significant & somewhat unexpected & irrational source of improvement proved to be adding in the `article_id` variable. As aforementioned under XGBoost modelling, it improved my results by ca. 0.25% AUC, giving me the final push to head the public leaderboard ca. 6 hours before the competition closes.
+
+# Conclusion
+
+This report summarized my efforts to win the in-house Kaggle competition hosted for the Data Science 2: Machine Learning Tools course held as part of the MSc Business Analytics program at the Central European University. As of writing these lines, my final best model leads the competitions' public leaderboard with an AUC of 0.7211. This is an XGBoost model, using all available training data & its variables, with parameters `nrounds = 500` i.e. number of trees, `max_depth = 9` maximum number of trees built on top of each other,`eta = 0.01` i.e. the learning rate from tree-to-tree, `gamma = 0.001` i.e. the pruning parameter, `colsample_bytree = 0.6` i.e. 60% of variables are randomly selected for each of the 500 trees from which a decision-tree is to be built, `min_child_weight = 10` i.e. the minimum number of observations needed at a leaf-node to be able to make a split  & `subsample = 0.8` i.e. 80% of observations are randomly selected to build the model. Project artifacts are all available on my GitHub ( [here](https://github.com/BrunoHelmeczy/Machine_Learning_Courses_DS1-3/tree/main/DS2/Kaggle) ). 
