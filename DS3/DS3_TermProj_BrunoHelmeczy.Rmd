@@ -1,0 +1,756 @@
+---
+title: "Unstructured Text Analysis - Understanding Glassdoor Reviews"
+author: "Bruno Helmeczy"
+date: 'Submitted 4 Review: `r format(Sys.Date(), format = "%B %drd, %Y")`'
+output:
+  rmdformats::readthedown:
+    code_folding: hide
+    code_download: true
+---
+
+```{r setup, include=T}
+knitr::opts_chunk$set(echo = TRUE, eval = F, warning = F
+                      ,message = F, out.width = '100%',fig.height=3)
+
+# Other rmdformats styles: material, readthedown, downcute
+
+```
+
+# Abstract
+
+This report summarizes my efforts on my Term Project in fulfillment of requirements to the Data Science 3: Unstructured Text Analysis course, part of the MSc in Business Analytics curriculum at the Central European University. In this project I first scrape a well-known jobs website, Glassdoor, to collect in total 20.000 employee reviews on 20 Firms in the Financial Industry. Then, I use the BING & AFINN sentiment dictionaries to categorize reviews into net positive & negative groups. Finally, I use reviews' Pros & Cons sub-comments, while employing topic modeling, to better understand how important specific company factors are to a net positive, or negative employee review sentiment. 
+
+
+# 1) Getting My Data 
+
+In this first section, I detail my methods to get my dataset. I use 2 functions to scrape employee reviews from Glassdoor, a well-known job website. My first function in essence takes the number of companies, whose information to return, plus a sector, in which to look for the biggest companies, & posts a GET request. Outputs of this function enable navigating a specific companys' subpages, e.g. Employee Reviews, Interview Questions, Benefits, Salaries & Jobs, of which for purposes of this project I focus on Employee Reviews. My second function in turn takes as argument a Company name, the results of my first function, & the number of reviews to collect.
+
+## 1.1) Function to Get Company Info Specifics
+
+```{r Libraries, eval = T}
+# 1.1) Libraries Used ----
+library(rvest)
+library(data.table)
+library(stringr)
+library(jsonlite)
+library(XML)
+library(dplyr)
+library(httr)
+library(ggplot2)
+library(ggthemes)
+library(readr)
+library(tidyr)
+library(tidytext)
+library(wordcloud)
+library(topicmodels)
+library(lubridate)
+library(kableExtra)
+library(knitr)
+library(grid)
+library(gridExtra)
+library(RColorBrewer)
+
+theme_set(theme_tufte())
+
+```
+
+
+```{r Getting Company URLs }
+
+# 1.2) Getting Company URL homepages to glassdoor homepages ----
+GetCompURLs <- function(HowManyCompaniesperSector, WhichSectors) {
+  Sectors <- c("Business Services","Construction"
+               ,"Aerospace Defense","InfoTech"
+               ,"Government","Transport & Logistics"
+               ,"Retail","TeleCommunications"
+               ,"HealthCare","Finance"
+               ,"Biotech","Consumer Services"
+               ,"Media","Accounting & Legal"
+               ,"Education","Manufacturing","Arts")
+  SectorIDs <- paste0(100,c( "06","07","02","13","11"
+                             ,"24","22","23","12","10"
+                             ,"05","08","16","01","09","15","04"))
+  SectorTable <- as.data.frame(cbind(Sectors,SectorIDs))
+  
+  # Define How Many Companies to select & for which industry
+  HowManyPages <- round(HowManyCompaniesperSector,-2)/100
+  ChosenIDs <- SectorTable[grep(tolower(WhichSectors)
+                                ,tolower(SectorTable$Sectors)),2]
+  
+  CompanyURLdf <- data.frame()
+  
+  headers = c(
+    `authority` = 'www.glassdoor.com',
+    `user-agent` = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36',
+    `content-type` = 'application/json',
+    `accept` = '*/*',
+    `sec-fetch-site` = 'same-origin',
+    `sec-fetch-mode` = 'cors',
+    `sec-fetch-dest` = 'empty',
+    `referer` = 'https://www.glassdoor.com/',
+    `accept-language` = 'hu-HU,hu;q=0.9,en-US;q=0.8,en;q=0.7',
+    `cookie` = 'JSESSIONID=CDE85AAC2C4E4E7E9236CB6102796332; GSESSIONID=CDE85AAC2C4E4E7E9236CB6102796332; gdId=337c4449-9b05-4374-89ce-a4b81a82cebf; trs=direct:direct:direct:2020-12-06+11%3A56%3A29.265:undefined:undefined; asst=1607284589.0; _ga=GA1.2.1319588859.1607284592; _gid=GA1.2.2054681431.1607284592; _GA_Content_Session=true; uc=44095BCBCAA84CA85E1E1C889F558AB53F465D17B6AB9B1B1048153C897955DFC9D4C6BB45196082A47FD1A3378740DA37F7E35D46DE9680CDFBDE7C16E01377D799014BBF5134015DE8EE7C575710997D520EDAA63D892734698C216E034A0F7A802023571581E27FAF630D166C0498AB76A9F7F414D0A4CAF8A0D39915B1D2C590CEC444DBF93B838102F63816CC4B; OptanonAlertBoxClosed=2020-12-06T19:56:36.212Z; _optionalConsent=true; _gcl_au=1.1.1558712385.1607284596; _hjTLDTest=1; _hjid=d2031b2a-bca4-459d-8890-b9b8caf0750d; _hjFirstSeen=1; ht=%7B%22quantcast%22%3A%5B%22D%22%5D%7D; _hjAbsoluteSessionInProgress=0; g_state={"i_p":1607291798444,"i_l":1}; JSESSIONID_SEO_APP=0F0293BFD8FF04BF2EB31041D5AE6E55; JSESSIONID_JX_APP=D593879001D4099213DD409F824C4D65; at=Lqjt3q7aIs-m9XbZMjpVdW4jiW2dNcPe9uo_ybWJ3UJqFJ_vSTzaiBKYgKn4snKbuetM1G66Vt8qA0ApNYRV7M6LftTy9cRZ52le8N9w2lx7lrbiNuoDhFAs6x0-zIo1g0qgLTxp9Ole051MDokEQiu-dPFdPtE02_oJdOMsjN2_j_DXxic_M0jDuL04Kp08QaGsUBw3W-bbSvZyL_FQyfpJAmtjOSyaULHv7CS1sNdRbKdYhnm2lYV-M7ud7AuMQkRkK-2-hrvIR-P856CHymSmKPZagDccUa6X_Ahzdi8-CLi3GqWr3oePfk0e4CKo4xc5mGmZmPTaznOxOIoIFG4jbcCa8UkV1cdoNgrwQZA4JAdAhfXyTDvVKV38_AmvDeko6LyH3ClQeQCS7ES3I8Mga8q1GjITBornFzmV3Slu_RGM7wE5_xQhnulStlJX8XwODgVbMIKRvvt6q--dHYt4QckJ5DcgMhqRgg-xsijuZSR4hYQTY_n0-_RGUu8tbKCFIH3Zte3Tp1hGX7CH_ORgOe9AAAn2YpDEWIKcfnkgSxzVccC_bm9110dbhM-M3YsFignLmckv_0YLZpySmYU1dn-BrNLpyOWg95ryOrqe9tVNMNxQxv1kEfAdyxJTbckGt7REgA0HUdrJmm6h2fbxEtzeF1vPzXmPBtogd_IABmnkVbolJOP3SgZ12_V3BOuljDgiyhW2EYI-dTK00-W1V0pKkA942LQ_MHA89IueFj2jNKcWkicYL4i8rX8wlle6Ognk8PWbd2TzeOA6Cwg1CDE0Lf3kx_9rADqW5YkUHMzichvn2SOySDwmlbJ1_WbHgvwpg8A84tBgndHNJcjBa0CFPRUH_NOD2OqIPfdU2TAlSqY6NDez; __cf_bm=00b147ea6440e604f2bc0def1fac4ce4a1b654f5-1607285500-1800-AR0281OA8vgQDSJT5ZXRZd+jkjD8CcyN5re904GlNczZ2E5HRHQ021f3+L7cLQeD38fUhb0PwY9T4x+hmukb/gE=; indeedCtk=1eosqt2kou3p8801; _GA_Job_Session=true; JSESSIONID_UP_APP=0F80435FC04A1C30A608D8D49C576C9D; _hjIncludedInSessionSample=0; bs=Q6ZGdWGLjn0gf0GD7PHB9Q:sy8c07qeEWElPcBfgr4gR5tQ6OMILKqXjUFYAaRUzdLNXqI-GVePFg1CU4-8cfCYHzjQyJ4grN0a484lOyQKzUnu-yrQ2l3q60NYQoL-AS8:a1yc5DB7G0ZSqgMpgopqhZ28impUo_xV22CSmve9CL8; _dc_gtm_UA-2595786-1=1; _gat_UA-2595786-1=1; cass=1; OptanonConsent=isIABGlobal=false&datestamp=Sun+Dec+06+2020+21%3A13%3A19+GMT%2B0100+(Central+European+Standard+Time)&version=6.8.0&hosts=&consentId=ade2e815-5690-46a2-8f97-03966a5124ff&interactionCount=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0003%3A1%2CC0002%3A1%2CC0004%3A1%2CC0017%3A1&geolocation=HU%3BBU&AwaitingReconsent=false; AWSALB=2xsiIUU2MEHVIFaWACrOQq8C1+mzOpnZzh99OJhyh4y1D8dd+GnV2WG7GyeprIjMY7YO1aAQ89g5jzYWAE7GG18YZTnUWlae+O4Ondyk+J1AtrctRAtZmTCXCgZmlLylUo+EJ0ctTxGWrJ+tAOGKnTQQ15SZtFH+GBXGUC3XrLs9NApgJRqw6SueYAOqMRF8n/iEwsiranuwv4AAnbpag9P/L72smuz+eB9HAN8R2UrtVPjs/p+tTGnZPspXPjo=; AWSALBCORS=2xsiIUU2MEHVIFaWACrOQq8C1+mzOpnZzh99OJhyh4y1D8dd+GnV2WG7GyeprIjMY7YO1aAQ89g5jzYWAE7GG18YZTnUWlae+O4Ondyk+J1AtrctRAtZmTCXCgZmlLylUo+EJ0ctTxGWrJ+tAOGKnTQQ15SZtFH+GBXGUC3XrLs9NApgJRqw6SueYAOqMRF8n/iEwsiranuwv4AAnbpag9P/L72smuz+eB9HAN8R2UrtVPjs/p+tTGnZPspXPjo='
+  )
+  
+  for (i in 1:HowManyPages) {
+    for (j in 1:length(ChosenIDs)) {
+      
+      params = list(
+        `minRating` = '3.5',
+        `maxRating` = '5',
+        `numPerPage` = "100",
+        `pageRequested` = as.character(i),
+        `domain` = 'glassdoor.com',
+        `surgeHiring` = 'false',
+        `sectorIds` = ChosenIDs[j]
+      )
+      Res <- httr::GET(url = 'https://www.glassdoor.com/seo/ajax/ugcSearch.htm'
+                       , httr::add_headers(.headers=headers), query = params)
+      df <-fromJSON( content(Res, 'text'))
+      
+      Res <- df$employerSearchResponse$results %>% 
+        select(id,shortName)
+      
+      Res$shortName <- gsub(" ","-",Res$shortName)
+      Res$url <- paste0("https://www.glassdoor.com/Overview/Working-at-"
+                        ,Res$shortName,"-EI_IE",Res$id,".11***.htm")
+      
+      Res$Sector <- SectorTable[which(SectorTable$SectorIDs %in% 
+                                        params$sectorIds),"Sectors"]
+      
+      CompanyURLdf <- rbind(CompanyURLdf,Res)   
+    }
+  }
+  
+  CompanyURLdf <- unique(CompanyURLdf)  
+  CompanyURLdf$index <- c(1:length(CompanyURLdf$shortName))
+  return(head(CompanyURLdf,HowManyCompaniesperSector*length(ChosenIDs))) 
+}
+
+Fin100 <- GetCompURLs(100,'Finan')
+
+```
+
+## 1.2) Function to Get My Reviews
+
+Having posted the GET request via the function above, & receiving a dataframe of company names, IDs, & main page URLs, I can pass this data frame to the function below, to select a company by rank, navigate to it's employee review sub-page, find the review boxes, & collect information I deemed relevant. Along the function, I print the number of reviews there are to collect, & whether efforts were successful for a given company, if a vector of companies are passed. The `AllProsCons lapply() + rbindlist()` combination collect all data I need on a given review page, & I'm looping through review pages by manipulating the website URLs. I'm collecting, Reviews' dates & locations, besides their textual contents. 
+
+At this point readers should keep in mind, that a given review has a title, & Pros, Cons & Comments sub-sections. My premise throughout this project is that a Review Title gives a conclusive remark, i.e. an overall positive / negative evaluation, whereas the Pros & Cons sections detail the topics leading to aforementioned overall evaluations.
+
+
+```{r Getting Reviews}
+# 1.3) Getting Reviews for top 100 Finance Companies ----
+GetCompanyReviews <- function(StartingCompNr, HowMany, HowManyReviewsPages, df_fr_GetCompURLs) {
+  AllReviews <- data.frame()
+  
+  for (i in StartingCompNr:(StartingCompNr+HowMany-1)) {
+    t <- read_html(df_fr_GetCompURLs$url[i])
+    CompName <- df_fr_GetCompURLs$shortName[i]
+    
+    print(paste0("Finding reviews for Company Nr. ",i, ": ", CompName))
+    
+    #Reviews -> Do all the below by page 
+    ReviewLink <- t %>% html_nodes(
+      xpath = "//*[@id='EIProductHeaders']/div/a[1]") %>% html_attr('href')
+    ReviewPage <- read_html(paste0("https://www.glassdoor.com",ReviewLink))
+    
+    # Find how many reviews & ReviewPages there are  
+    RevCount <- ReviewPage %>% 
+      html_nodes('.active') %>% html_text()
+    print(paste0(RevCount))
+    
+    if (length(grep("k",unlist(str_split(trimws(RevCount)," "))[1])) == 1) {
+      HowManyRevPages <- HowManyReviewsPages
+    } else {
+      RevCount <- as.numeric(unlist(str_split(trimws(RevCount)," "))[1])
+      print(RevCount)
+      HowManyRevPages <- HowManyReviewsPages
+    }  
+    
+    RevPages <- paste0("https://www.glassdoor.com"
+                       ,unlist(str_split(ReviewLink, ".htm"))[1]
+                       ,"_P",1:HowManyRevPages,".htm")
+    Reviews <- data.frame()
+    print(paste0("Fetching ", HowManyRevPages*10
+                  , " Reviews for Company Nr. ", i, ": ", CompName))
+    
+    # Collecting info from review boxes
+#    x <- RevPages
+    AllProsCons <- lapply(RevPages, function(x) {
+      tl <- list()
+      # print(paste0('Getting ',x))
+      
+      Box <- read_html(x) %>% html_nodes('.gdReview') 
+      
+      RevTitles <- Box %>% html_nodes(xpath = '//*/div[1]/h2') %>% html_text()
+      tl[['Review_Title']] <- RevTitles[1:10]
+      # Maybe can be treated as overall opinion 
+      
+      DateLoc <- Box %>% html_nodes(xpath = '//*[@class="authorInfo"]') %>% html_text()
+      Dates <- substr(DateLoc,1, str_locate(DateLoc,' - ')[,1]) %>% trimws() %>% 
+        as.character.Date( format = '%B %d, %Y') %>% as.Date(format = '%B %d, %Y')
+
+        tl[['Date']] <- c(Dates, rep(NA,10-length(Dates)))
+        # Finding the dash pattern in every date-location string
+          # str_locate(DateLoc,' - ')[,1]-1
+        # Subsetting strings from start until space before dash
+        # trimming spaces with trimws()
+        # reading date strings 1st as characters, then 2nd as regular dates specifying date formats
+      Locs <- substr(DateLoc,str_locate(DateLoc,'in ')[,2]+1, nchar(DateLoc))
+      tl[['Location']] <- c(Locs, rep(NA,10-length(Locs)))
+        # Strings where city is mentioned, it is mentioned after the word 'in'
+          # We substring original strings using located 'in ' patterns end
+          # it returns NA if 'in ' wasn't found in strings -> i.e. city was not mentioned
+      
+      ProsCons <- Box %>% 
+        html_nodes('.v2__EIReviewDetailsV2__isExpanded , .v2__EIReviewDetailsV2__isCollapsed , .strong') %>% 
+        html_text()
+      tl[['Pros']] <- ProsCons[grep("Pros", ProsCons)+1][1:10]
+      tl[['Cons']] <- ProsCons[grep("Cons", ProsCons)+1][which(nchar(ProsCons[grep("Cons", ProsCons)]) == 4)][1:10]
+      tl[['Comments']] <- ProsCons[grep("\"", ProsCons)][1:10]
+      tl[['Company']] <- unlist(str_split(unlist(
+        str_split(x,"Reviews/"))[2],"-Reviews"))[1]
+      
+      return(tl)
+    })
+    
+    df <- rbindlist(AllProsCons, fill = T)
+    Reviews <- rbind(Reviews,df)
+    AllReviews <- rbind(AllReviews, Reviews)
+    
+    saveRDS(AllReviews,paste0('CompanyReviews_',Sys.Date(),'.rds'))
+    print(paste0("Compiling Reviews for companies. "
+                 ,length(AllReviews$Comments) 
+                 , " Reviews collected so far" ))
+    next()
+  }
+  return(AllReviews) 
+}
+
+```
+
+## 1.3) Putting it Together 
+
+Armed with the above I can subset my initial dataframe with a vector major Finance Industry firms' names I want to collect reviews from & simply loop through them, specifying that I am interested in collecting from 100 review web pages, given 10 reviews are place under 1 URL.  
+
+```{r Looping through selected companies}
+# 1.4) Using 1.2 - 1.3 to get my data ----
+Fam20Banks <- gsub('-',' ',Fin100$shortName) %in% 
+  c("Bank of America","GE Capital","Capital One","RBC","Capital Group","Wells Fargo",
+    "J.P. Morgan","Citi","UBS","Fifth Third","The Blackstone Group","Morgan Stanley",
+    "Santander","BlackRock","Goldman Sachs","Barclays","Credit Suisse",
+    "Deutsche Bank","Merrill Lynch","HSBC Holdings")
+
+Reviews_DateLocs <- GetCompanyReviews(1,1,100,Fin100)
+for ( i in 1:nrow(Fin100[Fam20Banks,])) {
+  CompRevs <- GetCompanyReviews(i,1,100,Fin100[Fam20Banks,])
+  Reviews_DateLocs <- rbind(Reviews_DateLocs,CompRevs)
+}
+
+```
+
+In the interest of convenient rendering & avoiding 403 errors while scraping, I stored the data (also available on my GitHub) & read it in below. After also removing non-unicode characters, a snippet of the dataset is visible below. I can already see some inaccuracies in the data, given some titles contain employee positions, while others give a short remark on their experiences.
+
+```{r Getting the loaded data, eval = T}
+Reviews_DateLocs <- read_csv("DS3_Glassdoor_Reviews_Data.csv")[,-1]
+
+Reviews_DateLocs$Review_Title <- gsub("[^0-9A-Za-z///' ]",'',Reviews_DateLocs$Review_Title)
+Reviews_DateLocs$Pros <- gsub("[^0-9A-Za-z///' ]",'',Reviews_DateLocs$Pros)
+Reviews_DateLocs$Cons <- gsub("[^0-9A-Za-z///' ]",'',Reviews_DateLocs$Cons)
+
+Reviews_DateLocs %>% 
+  select(Company, Date, Location,Review_Title, Pros,Cons) %>% 
+  mutate(RevStrLength = nchar(Review_Title),
+         ProsStrLength = nchar(Pros),
+         ConsStrLength = nchar(Cons)) %>% 
+  filter(RevStrLength < 25, ProsStrLength < 25, ConsStrLength < 25) %>% 
+  filter(!is.na(Location)) %>% 
+  arrange(desc(RevStrLength, ProsStrLength, ConsStrLength)) %>% 
+  select(-c(RevStrLength, ProsStrLength, ConsStrLength)) %>% head(10) %>% 
+  kbl(caption = "Dataset Snippet") %>% 
+    kable_classic("hover",html_font = "Cambria", full_width = T)
+
+```
+
+
+
+# 2) Some basic EDA plots
+
+Below I'm looking to get familiar with my data via a series of high-level charts. To do so, I 1st build a corpus of the Review titles, & then join all 3 major sentiment libraries, BING, AFINN, & NRC, much relying on `dplyr` along the way.  
+
+## 2.1) Putting my data together
+
+```{r EDA Data, eval = T}
+
+Sents_Qual <- get_sentiments('nrc') # Qualitative Sentiment
+Sents_Binary <- get_sentiments('bing') # Positive / Negative
+Sents_Scored <- get_sentiments('afinn') # Scored from +5 to -5 
+
+MySentiments <- Reviews_DateLocs %>% 
+  select(Company,Review_Title,Date,Location) %>% 
+  arrange(Date) %>% 
+  group_by(Company) %>% 
+  mutate(Comment_Nr = row_number()) %>% 
+  ungroup() %>% 
+  unnest_tokens(word,Review_Title) %>% 
+  anti_join(stop_words[stop_words$lexicon == 'SMART',]) %>% 
+  left_join(Sents_Binary) %>%
+  rename(Binary_Sentiment = sentiment) %>% 
+  left_join(Sents_Scored) %>% 
+  rename(Scored_Sentiment = value) %>% 
+  left_join(Sents_Qual) %>% 
+  rename(Qual_Sentiment = sentiment)
+
+```
+
+
+## 2.2) Reviews' Distribution by Year
+
+First and foremost we should be interested in the time line along which data has been successfully scraped. The chart & table below shows that ca. 50% of reviews originate from 2021, though some date as far back as 2008. This has to do with an employers' review density, i.e. how frequently do they recieve reviews, & how many reviews do they have on Glassdoor in total. E.g. Morgan Stanley has all their reviews from the past 12 months. In other words, the fixed point for me was the number of reviews to collect, & if a firms got reviews less frequently, older reviews were scrapped (the reviews on Glassdoor are ordered based on recency be default, though further URL manipulations could address that, if needed).
+
+```{r EDA a, eval = T }
+Reviews_DateLocs %>% 
+  group_by(Company,Year = year(Date)) %>% 
+  summarize(count = n()) %>%  
+  ggplot(aes(Year, count, fill = Company, group = Company)) +
+  geom_col(show.legend = F) + theme(legend.position = 'bottom',
+                                    axis.title.x = element_blank()) + 
+  labs(title = 'Reviews Freq. Distribution by Year - Colored by Companies',
+       x = 'Number of Reviews')
+
+tbl1 <- Reviews_DateLocs$Date %>% year() %>% table() %>% data.frame() %>% transpose()
+colnames(tbl1) <- tbl1[1,]
+rownames(tbl1) <- c("Year",'Nr of Reviews')
+
+tbl1[-1,] %>% 
+  kbl(caption = "Number of Reviews Collected by Year", colnames = NULL) %>% 
+    kable_classic("hover",html_font = "Cambria", full_width = T)
+
+```
+
+## 2.3) Finance Industry Over the Years
+
+A second obvious interest is whether we can detect the net sentiment towards the finance industry, over the years. Though reviews are rather sparse as far back as the financial crisis, one would expect to see an increase after 2008. On the other hand this a god chance to compare the affect of various libraries used to detect average net sentiment. As can be seen below, the line above are visibly highly correlated, with net average scores resulting from the AFINN library being ca. 2.5x multiples of the BING library. 
+
+```{r plots b,  eval = T}
+BinSents2plot <- MySentiments %>% 
+  filter(!is.na(Binary_Sentiment)) %>% 
+  group_by(Company,Comment_Nr, Date) %>% 
+  summarize(Pos_Sentiment = sum(Binary_Sentiment == 'positive'),
+            Neg_Sentiment = sum(Binary_Sentiment != 'positive')) %>% 
+  mutate(Net_Sentiment = Pos_Sentiment - Neg_Sentiment) %>% 
+  select(-c(Pos_Sentiment,Neg_Sentiment)) %>% 
+  mutate(Month = lubridate::month(Date, label = T),
+         Year = year(Date)) %>% 
+  group_by(Company,Month,Year) %>% 
+  summarize(Date = min(Date),
+            Aggreg_Net_Sentiment = sum(Net_Sentiment),
+            Review_Count = n()) %>% 
+  mutate(Average_Sentiment = Aggreg_Net_Sentiment/Review_Count) 
+  
+AFINNSents2plot <- MySentiments %>% 
+  filter(!is.na(Scored_Sentiment)) %>% 
+  group_by(Company,Comment_Nr, Date) %>% 
+  summarize(Net_AFinn_Sentiment = sum(Scored_Sentiment)) %>% 
+  mutate(Month = lubridate::month(Date, label = T),
+         Year = year(Date)) %>% 
+  group_by(Company,Month,Year) %>% 
+  summarize(Date = min(Date),
+            Aggreg_Net_Sentiment = sum(Net_AFinn_Sentiment),
+            Review_Count = n()) %>% 
+  mutate(Average_Sentiment = Aggreg_Net_Sentiment/Review_Count) 
+
+AFINNSents2plot$Library <- "AFINN"
+BinSents2plot$Library <- "BING"
+
+# By Year line chart ----
+rbind(AFINNSents2plot,BinSents2plot) %>% 
+  group_by(Year, Library) %>% 
+  summarize(Date = min(Date),
+            Average_Sentiment = sum(Aggreg_Net_Sentiment)/sum(Review_Count)) %>% 
+  ggplot(aes(Date,Average_Sentiment, color = Library)) +  geom_line() +
+  labs(title = 'Finance Industry Average Net Sentiment',
+       x = 'Time', y = 'Net Average Sentiment Score') + 
+  theme(legend.position = 'bottom')
+
+```
+
+## 2.4) Overall Sentiments for given Firms
+
+Another high-level interest is looking to compare employee sentiments across Firms. Note that this is the only place where Firms are identified by name. This is another place where the affects of different libraries may well be of interest, generally a common theme throughout the report. Observing below, 1 can see the Royal Bank of Canada & J.P.Morgan being viewed in the best light overall, while Santander distinctively in the worst, regardless of sentiment libraries. Other then these, one can only see minor variations in the order of firms, when ranked by net average employee sentiment.
+
+At this point, we can hypothesize that the library used between BING & AFINN is not of serious concern, though it causes a minor discrepency, due different sets of comments being scored or not scored, resulting in NA scores, which are dropped while aggregating scores. Regardless, I keep using both dictionaries to try & make more robust deductions. 
+
+```{r plots a, eval = T}
+
+# Lets see How do firms compare in general  ---
+Binplot1 <- BinSents2plot %>% 
+  group_by(Company) %>% 
+  summarize(Average_Net_Sentiment = sum(Aggreg_Net_Sentiment)/sum(Review_Count)) %>% 
+  ggplot(aes(Average_Net_Sentiment,reorder(Company,Average_Net_Sentiment),
+             fill = -Average_Net_Sentiment)) +
+  geom_col(show.legend = F) + # coord_flip() + 
+  labs(title = 'Average Net Sentiments - BING Library',
+       x = 'Sentiment Scores') + theme(
+         plot.title.position = "plot",
+         axis.title.y = element_blank())
+
+Afinnplot1 <- AFINNSents2plot %>% 
+  group_by(Company) %>% 
+  summarize(Average_Net_Sentiment = sum(Aggreg_Net_Sentiment)/sum(Review_Count)) %>% 
+  ggplot(aes(Average_Net_Sentiment,reorder(Company,Average_Net_Sentiment),
+             fill = -Average_Net_Sentiment)) +
+  geom_col(show.legend = F) + # coord_flip() + 
+  labs(title = 'Average Net Sentiments - AFINN Library',
+       x = 'Sentiment Scores') + theme(
+         plot.title.position = "plot",
+         axis.title.y = element_blank())
+
+grid.arrange(Binplot1,Afinnplot1, ncol = 2)
+
+```
+
+## 2.5) By Firm over the years
+
+In a similar vein, one can see generally similar paths of same colors across libraries used, colors representing given Firms. It also seem kind of useless to dig deeper into a specific firm, given large discrepencies seem rare, and net average sentiment seeming to remain by & large constant.
+
+```{r EDA e, eval = T }
+
+rbind(AFINNSents2plot,BinSents2plot) %>% 
+  group_by(Company,Year, Library) %>% 
+  summarize(Date = min(Date),
+            Average_Sentiment = sum(Aggreg_Net_Sentiment)/sum(Review_Count)) %>% 
+  ggplot(aes(Date,Average_Sentiment, color = Company)) +  
+  geom_line(show.legend = F) +
+  labs(title = 'Finance Industry Net Sentiment by Firm over time',
+       y = 'Net Average Sentiment Score') + 
+  theme(axis.title.x = element_blank()) + 
+  facet_wrap(~ Library, ncol = 1, scales = 'free_y')
+
+```
+
+
+
+# 3) A more programmatic approach
+
+Until now I used the traditional `dplyr` approach to format my data as fitting to visualizations, but in the interest of avoiding repition while iterating over libraries & Review title, & Pros & Cons columns, I define a function to score reviews, given a chosen review column (Review Title, Pros, or Cons) & a sentiment library (AFINN, BING, or NRC).  
+
+## 3.1) Get Net Binary Scores + Strength of Qualitative Sentiments
+
+To achieve the above, I first subset my dataset to Dates, Companies & Locations plus the selected review column, arrange the resulting dataframe by data & attach a CommentID to later aggregate by. Then. I create a Corpus based on the selected review column, remove stopwords with `anti_join()` & `inner_join()` the sentiment dictionary passed as a function input. Then, depending on the selected dictionary, I aggregate scores resulting from the dictionary applied to the corpus, by the previously defined CommentID, join it back to the dataframe subsetted in the first step, & return the resulting dataframe as function output. This way, & can also join together multiple iterations of this function, to get a dataframe of the analyzed review column, scored via either, or all of libraries used throughout this report, including the NRC dictionaries' qualitative sentiments.   
+
+```{r LibSent function, eval = T}
+
+# Function: 
+  # Inputs: Column to score / sentiment lib to use
+  # Goal/OutPut: Original DF + Extra Column with Sentiment Score / Name
+Score_Reviews <- function(ColumnName, SentimentLibrary ) {
+  # 1) Get Data with Comp Name, Date,Location, Chosen ColumnName
+mydata <- Reviews_DateLocs %>% 
+  select(Company,Date,Location,matches(ColumnName)) %>% 
+  arrange(Date) %>% 
+  mutate(CommentId = row_number())
+  
+  # 2) Make Corpus & Add sentiment Library
+Corpus <- mydata %>% unnest_tokens(word,ColumnName) %>% 
+  filter(!is.na(word)) %>% 
+  anti_join(stop_words[stop_words$lexicon == 'SMART',]) %>% 
+  inner_join(SentimentLibrary)
+
+  # 3) Aggregate Sentiment by CommentID - IF Else
+if ( is.numeric(Corpus$value) ) { # AFINN
+  ToJoinback <- Corpus %>% group_by(CommentId) %>% 
+    summarize(Net_Afinn_Sentiment = sum(value))
+
+} else if ( length(unique(Corpus$sentiment)) == 2 ) { # Bing Library
+  Corpus$sentiment <- gsub('negative',-1,gsub('positive',1,Corpus$sentiment)) %>% as.numeric()
+  
+  ToJoinback <- Corpus %>% group_by(CommentId) %>% 
+    summarize(Net_Bing_Sentiment = sum(sentiment))
+  
+} else { # NRC Library
+  ToJoinback <- Corpus %>% group_by(CommentId, sentiment) %>% 
+    summarize(count = n()) %>% 
+    pivot_wider(id_cols = 'CommentId',names_from = 'sentiment', 
+                values_from = 'count', values_fill = 0) %>% 
+    select(-c(positive,negative))
+}
+RetDf <- mydata %>% left_join(ToJoinback) 
+return(RetDf)
+
+} # End of Score Reviews function
+
+# Lets re-use it to bind everything together
+ReviewTitleScores <- Score_Reviews('Review_Title',get_sentiments('afinn')) %>% 
+  left_join(Score_Reviews('Review_Title',get_sentiments('bing')), 
+            by = c('CommentId','Company','Date','Location','Review_Title')) %>% 
+  left_join(Score_Reviews('Review_Title',get_sentiments('nrc')), 
+            by = c('CommentId','Company','Date','Location','Review_Title')) %>% 
+  as.data.frame() %>% filter(!is.na(Date))
+
+```
+
+## 3.2) Let's do some Wordclouds
+
+As said, the function above allows me to score all comments with all 3 dictionaries, which allows me to categorize an employee review into positive or negative, given its' aggregate score. Note that the BING dictionary also results in integer scores, as positive & negative categorizations are considered as +/- 1s. These resulting scores are then used to consider a review either positive or negative overall, which lends itself well to further exploratory visualizations.
+
+One prime candidate for this are wordclouds, when one tries to communicate important keywords. In this case, I'm trying to find out what are the key phrases in review titles, conditioned on whether I evaluated the review as positive or negative overall. To be able to see this, I again create a corpus of the column based on which I scored reviews, and apply stop words. Then for a wordcloud for only positive reviews, I filter the dataset accordingly, & count th enumber of times a word occurred in the respective data set, repeating this also for negative words, as well as both the BING & AFINN libraries, & coloring positive negative designated categories as Blue & Red respectively (note that both word-size & color-shade are mapped to word-frequency).
+
+Again, we can see largely overlapping results across libraries used, & based on the clouds not very suprising words: Most often positive reviews are filled with terms like 'Good Company' & 'Great Work Place', while negative reviews are often filled with words, like 'Bad Management', 'Culture', 'Pay', 'Work' & 'Company', rather intuitively pointing to the nature of problems at these places.
+
+Finally, using the NRC library, I can also score reviews on aggregate along either of the 8 qualitative sentiments, using my aforementioned function & excluding positive & negative emotions. Unsurprisingly, positive reviews are almost exclusively characterized by the positive emotions, Surprise, Joy, Anticipation & Trust, though the latter 2 also appear among negatively characterized reviews, most likely due to negation words.
+
+
+
+
+### Based on the BING Library
+
+```{r wordclouds, eval = T, fig.height=5, out.width='50%'}
+Clouding <- ReviewTitleScores %>% 
+  select(ReviewTitleScores[,1:5] %>% colnames(),matches('BING'))  %>% 
+  unnest_tokens(word,'Review_Title') %>% 
+  anti_join(stop_words[stop_words$lexicon == 'SMART',]) %>% 
+  filter(!is.na(word)) 
+
+PosCloud <- Clouding[which(Clouding[,5] > 0) ,] %>% 
+  group_by(word) %>% 
+  summarize(freq = n()) %>% 
+  arrange(desc(freq))
+
+NegCloud <- Clouding[which(Clouding[,5] < 0) ,] %>% 
+  group_by(word) %>% 
+  summarize(freq = n()) %>% 
+  arrange(desc(freq))
+
+grid.arrange(
+grid::grob(wordcloud(words = PosCloud$word,freq = PosCloud$freq, max.words = 12,
+                     colors = brewer.pal(9,"Blues") )),
+grid::grob(wordcloud(words = NegCloud$word,freq = NegCloud$freq, max.words = 10,
+                     colors = brewer.pal(9,"Reds"))),ncol = 2  )
+```
+<div align="center">**Word Clouds of Most used words in Positive (Blue) / Negative (Red) Review Titles - BING Library**</div>
+
+### Based on the AFINN Library
+
+```{r wordclouds2, eval = T, fig.height=5, out.width='50%'}
+Clouding2 <- ReviewTitleScores %>% 
+  select(ReviewTitleScores[,1:5] %>% colnames(),matches('AFINN'))  %>% 
+  unnest_tokens(word,'Review_Title') %>% 
+  anti_join(stop_words[stop_words$lexicon == 'SMART',]) %>% 
+  filter(!is.na(word)) 
+
+PosCloud2 <- Clouding2[which(Clouding2[,5] > 0) ,] %>% 
+  group_by(word) %>% 
+  summarize(freq = n()) %>% 
+  arrange(desc(freq))
+
+NegCloud2 <- Clouding2[which(Clouding2[,5] < 0) ,] %>% 
+  group_by(word) %>% 
+  summarize(freq = n()) %>% 
+  arrange(desc(freq))
+
+grid.arrange(
+grid::grob(wordcloud(words = PosCloud2$word,freq = PosCloud2$freq, max.words = 12,
+                     colors = brewer.pal(9,"Blues") )),
+grid::grob(wordcloud(words = NegCloud2$word,freq = NegCloud2$freq, max.words = 10,
+                     colors = brewer.pal(9,"Reds"))),ncol = 2  )
+```
+<div align="center">**Word Clouds of Most used words in Positive (Blue) / Negative (Red) Review Titles - AFINN Library**</div>
+
+
+### Strengths of detected Emotions from NRC Library
+
+```{r wordclouds3 , eval = T, out.width='50%', fig.height=5}
+
+mydf3 <- ReviewTitleScores %>% 
+  filter(Net_Bing_Sentiment > 0) %>% 
+  select(Company,Date,matches('ant|joy|surp|trust|disg|anger|fear|sad')) 
+
+tocloudbingpos <- mydf3 %>% 
+  pivot_longer(cols = colnames(mydf3)[3:length(colnames(mydf3))],
+               names_to = 'sentiment',values_to = 'score') %>% 
+  group_by(sentiment) %>% 
+  summarize(TotalScore = sum(score,na.rm = T),
+            MeanScore = mean(score,na.rm = T))
+
+mydf4 <- ReviewTitleScores %>% 
+  filter(Net_Bing_Sentiment < 0) %>% 
+  select(Company,Date,matches('ant|joy|surp|trust|disg|anger|fear|sad')) 
+
+tocloudbingneg <- mydf4 %>% 
+  pivot_longer(cols = colnames(mydf4)[3:length(colnames(mydf4))],
+               names_to = 'sentiment',values_to = 'score') %>% 
+  group_by(sentiment) %>% 
+  summarize(TotalScore = sum(score,na.rm = T),
+            MeanScore = mean(score,na.rm = T))
+
+grid.arrange(
+grob(wordcloud(tocloudbingpos$sentiment,tocloudbingpos$MeanScore,
+               colors = brewer.pal(9,"Blues") ) ),
+grob(wordcloud(tocloudbingneg$sentiment,tocloudbingneg$MeanScore,
+               colors = brewer.pal(9,"Reds") ) ),
+  ncol = 2)
+
+
+```
+<div align="center">**Word Clouds of detectable emotions' strengths in Positive (Blue) / Negative (Red) Review Titles - categorized by AFINN Library, emotions detected by NRC Library**</div>
+
+
+# 4) Trying 2 Dig a bit Deeper: TF-IDF & Topic Modelling
+
+## 4.1) TF-IDF
+
+Extracting most frequent words by overall net sentiment did not exactly bring new insights. Happy people say they're working at a great place overall, & those unsatisfied think the management is bad, there is a company culture problem, or the company is bad, when describing their experience overall. 
+
+To over come this problem, & try to find something more meaningful, I calculate term-frequency - inverse document frequencies, by reviews categorized based on review titles, doing so on the Pros & Cons columns of the dataset. I also  repeat this using both the BING & AFINN dictionaries, yielding 4 repetitions, 1 more than what's claimed enough to write a function. 
+
+This function again takes the dictionary to use & which column to evaluate (Pros or Cons). It then uses my first function shown, `Score_Reviews()` to get the scores & categorizations of review titles, given the sentiment dictionary. Then, it again uses `Score_Reviews()` with a `left_join()` to get back the selected Pros or Cons columns' scoring. Next, I make a Corpus with `unnest_tokens()` on the selected Pros or Cons column, calculating the number of occurrences of any word, as well as the total number of words. Then I pass this resulting dataframe to the `bind_tf_idf()` function, & visualize top 10 most important words, both for reviews that where categorized earlier as negative, and positive.
+
+This way, my intuition is that we can see the most important 'Pro'-company words that were used, colored by whether the overall commment was positive or negative. I.e. if a review was overall positive, my premise is that the 'Pros' column should highlight the most importnat reasons why a company is viewed positively, while for overall negatively viewed companies the 'Pros' column should highlight positive aspects, but those that were less important in the grand scheme of things. Obviously for the 'Cons' column its vice versa, I'd expect to see for overall positively categorized reviews to tell minor issues with a firm, despite being seems on a good light overall, while the negative plot should show the deal-breaker bad key words.
+
+With that in mind, we can already see greate variation, in the appearing terms, also across dictionaries used. Flex, Feedback, Supporting, Commited, Core & Mutual seems more descriptive then we've seen previously, &  allow us to hazard these are most important for an employee to view its' employer firm positively. Interestingly, the 'Cons' for overall positive reviews include words like Coffee, Tax, constructive, Overwhelming, Paced, & navigate, probably pointing towards high-taxes, not enough or bad coffee, most likely a lack of constructive environment or feedback, & a fast-paced, perhaps overwhelming environment, which may be hard to navigate at times. 
+
+```{r TF-IDF, eval = T, fig.height=2}
+Get_TfIdf_Chart <- function(SentLib2Use,Pros_Cons_as_String) {
+  
+  tfidf_prep <- Score_Reviews('Review_Title',get_sentiments(SentLib2Use)) 
+  Col <- tfidf_prep %>% select(matches('sentiment')) %>% colnames()
+  tfidf_prep$Net_Sent <- tfidf_prep[,Col]
+  
+  tfidf_prep <- tfidf_prep  %>% 
+    filter(!is.na(Net_Sent))  %>% 
+    mutate(Category = ifelse(Net_Sent > 0,'Positive','Negative')) %>% 
+    left_join(Score_Reviews(Pros_Cons_as_String,get_sentiments(SentLib2Use)) %>% 
+                select(CommentId, matches(Pros_Cons_as_String))) 
+  
+  # Grouping Words 
+  GroupWords <- tfidf_prep %>% 
+    unnest_tokens(word,Pros_Cons_as_String) %>%
+    anti_join(stop_words) %>%
+    count(Category,word, sort = T)
+  
+  TotalWords <- GroupWords %>% 
+    group_by(Category) %>% 
+    summarize(total = sum(n))
+  
+  Fin_tfidf <- GroupWords %>% left_join(TotalWords) %>% 
+    bind_tf_idf(word,Category,n) %>% 
+    select(-total) %>% 
+    arrange(desc(tf_idf))
+  
+  # Creating Final DF + Viz
+  FinDf <- Fin_tfidf %>% 
+    group_by(Category) %>% 
+    mutate(rank = row_number()) %>% 
+    arrange(rank) 
+  
+  FinPlot <- FinDf %>% filter(rank <=10) %>% 
+    ggplot(aes(reorder(word,-rank),tf_idf, fill = Category)) +
+    geom_col(show.legend = F) + 
+    facet_wrap(~ Category, ncol = 2, scales = 'free') +
+    coord_flip() + 
+    labs(title = paste0("Top ",Pros_Cons_as_String," terms per TF-IDF by Reviews Net ",SentLib2Use," Sentiment"),
+         x = 'Top 10 Words by TF-IDF') + 
+    theme(plot.title.position = "plot")
+  
+  FinObj <- list('Viz' = FinPlot,
+                 'df' = FinDf)
+  return(FinObj)
+}
+
+a <- Get_TfIdf_Chart('bing', 'Pros')
+b <- Get_TfIdf_Chart('afinn', 'Pros')
+c <- Get_TfIdf_Chart('bing', 'Cons')
+d <- Get_TfIdf_Chart('afinn', 'Cons')
+```
+
+### Top Terms in 'Pros' Section by Categorized Review Sentiment
+
+```{r tfidf-a, eval = T, fig.height = 2}
+
+a$Viz
+b$Viz
+
+```
+
+### Top Terms in 'Cons' Section by Categorized Review Sentiment
+
+```{r tfidf-b, eval = T, fig.height = 2}
+
+c$Viz
+d$Viz
+
+```
+
+
+## 4.2) Topic Modelling
+
+Finally, I try to apply topic modelling to the Pros & Cons review columns, to better be able to distinguish the topics discussed. Irrespective of the library used however, I find that many words overlap even in the top 10, so I wouldnt call any findings conclusive. Reading the results I have a slight hunch that topic one describes future prospects, while topic 2 can be attributed to company culture & the team environment, atleast when considering the 'Pros' column. On the 'Cons' side however, I cannot decipher any 2 seperate topics.
+
+```{r topicmdl fx, eval = T}
+Get_TopicMdl_Charts <- function(SentLib2Use,Pros_Cons_as_String, Nr_Topics = 2) {
+  TopMdl_prep <- Score_Reviews('Review_Title',get_sentiments(SentLib2Use)) 
+  Col <- TopMdl_prep %>% select(matches('sentiment')) %>% colnames()
+  TopMdl_prep$Net_Sent <- TopMdl_prep[,Col]
+  
+  TopMdl_prep <- TopMdl_prep  %>% 
+    filter(!is.na(Net_Sent))  %>% 
+    mutate(Category = ifelse(Net_Sent > 0,'Positive','Negative')) %>% 
+    left_join(Score_Reviews(Pros_Cons_as_String,get_sentiments(SentLib2Use)) %>% 
+                select(CommentId, matches(Pros_Cons_as_String))) 
+  
+  # Grouping Words 
+  GroupWords <- TopMdl_prep %>% 
+    unnest_tokens(word,Pros_Cons_as_String) %>%
+    anti_join(stop_words) %>%
+    count(Category,word, sort = T)
+  
+  TotalWords <- GroupWords %>% 
+    group_by(Category) %>% 
+    summarize(total = sum(n))
+  
+  # cast_dtm() -> data, document, word, value
+  Fin_TopicMdl <- GroupWords %>% left_join(TotalWords) %>% 
+    cast_dtm(Category,word,n) %>% 
+    LDA(k = Nr_Topics, control = list(seed = 20210523))
+  
+  # Getting Final Viz  
+  FinViz <- Fin_TopicMdl %>% tidy() %>% 
+    group_by(topic) %>% 
+    arrange(desc(beta)) %>% 
+    mutate(rank = row_number()) %>% 
+    ungroup() %>% filter(rank <= 10) %>% 
+    mutate(term = reorder(term,beta)) %>% 
+    ggplot(aes(beta,reorder(term,-rank),fill = factor(topic))) + 
+    geom_col(show.legend = F) +
+    facet_wrap(~ topic, scales = 'free_y') + 
+    labs(title = paste0('Top words by fitted Topic to ',Pros_Cons_as_String,' sub-Comments with',SentLib2Use,' Lib' ),
+         y = 'Top Terms') 
+  
+  return(FinViz)
+  
+}
+
+a <- Get_TopicMdl_Charts('bing','Pros')
+b <- Get_TopicMdl_Charts('afinn','Pros')
+c <- Get_TopicMdl_Charts('bing','Cons')
+d <- Get_TopicMdl_Charts('afinn','Cons')
+
+```
+
+### Topics in Pros column by sentiment libraries
+
+```{r topicmodelplots1, eval = T, fig.height=2}
+a
+b
+```
+
+### Topics in Cons column by sentiment libraries
+
+```{r topicmodelplots2, eval = T, fig.height=2}
+c
+d
+
+```
+
+
